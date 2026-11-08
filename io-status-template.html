@@ -1,0 +1,376 @@
+<template>
+  <div class="io-page">
+
+    <!-- ============ HEADER ============ -->
+    <div class="page-header">
+      <span class="page-title">IO Status</span>
+      <div class="header-right">
+        <span class="clock-text">{{ clockText }}</span>
+        <span class="tag" :class="statusBadge.cssClass">{{ statusBadge.text }}</span>
+      </div>
+    </div>
+
+    <!-- แถบแดง: แสดง error ที่ได้จาก PLC (ถ้ามี) -->
+    <div class="error-bar" v-if="plcState.errorText">PLC ERROR · {{ plcState.errorText }}</div>
+
+    <div class="columns">
+
+      <!-- ============ INPUTS (ซ้าย): แสดงสถานะอย่างเดียว ============ -->
+      <div class="card">
+        <div class="card-header">
+          <p class="card-label">INPUTS · I0.0 – I1.5</p>
+          <span class="count-text"><b>{{ inputsOnCount }}</b> / {{ inputPoints.length }} ON</span>
+        </div>
+        <div class="point-grid" :style="{ '--rows': Math.ceil(inputPoints.length / 2) }">
+          <div class="point-tile" v-for="point in inputPoints" :key="point.address">
+            <span class="lamp-dot" :class="point.isOn ? 'green' : 'off'"></span>
+            <span class="point-address">{{ point.address }}</span>
+            <span class="point-name">{{ point.name }}</span>
+            <span class="state-pill" :class="point.isOn ? 'on' : 'off'">{{ point.isOn ? 'ON' : 'OFF' }}</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- ============ OUTPUTS (ขวา): กดเพื่อสั่ง ON/OFF ได้ในโหมด MANUAL ============ -->
+      <div class="card">
+        <div class="card-header">
+          <p class="card-label">OUTPUTS · Q0.0 – Q1.1</p>
+          <span class="count-text"><b>{{ outputsOnCount }}</b> / {{ outputPoints.length }} ON</span>
+        </div>
+        <p class="hint-text" :class="{ warning: outputHint.isWarning }">{{ outputHint.text }}</p>
+        <div class="point-grid" :style="{ '--rows': Math.ceil(outputPoints.length / 2) }">
+          <button type="button" class="point-tile point-button"
+            v-for="(point, outputIndex) in outputPoints" :key="point.address"
+            :disabled="!canCommandOutputs" :aria-pressed="point.isOn" @click="toggleOutput(outputIndex)">
+            <span class="lamp-dot" :class="point.isOn ? 'amber' : 'off'"></span>
+            <span class="point-address">{{ point.address }}</span>
+            <span class="point-name">{{ point.name }}</span>
+            <span class="state-pill" :class="point.isOn ? 'on' : 'off'">{{ point.isOn ? 'ON' : 'OFF' }}</span>
+          </button>
+        </div>
+      </div>
+
+    </div>
+
+    <!-- บรรทัดตรวจสอบ: ค่าดิบที่ Node-RED อ่านได้จาก PLC (ลบบรรทัดนี้ได้เมื่อใช้งานปกติแล้ว) -->
+    <!--<div class="raw-text">RAW · {{ rawValuesText }}</div> -->
+  </div>
+</template>
+
+<script>
+/*
+  IO STATUS  ·  Dashboard 2.0 ui-template
+  - ตั้งชื่อแต่ละจุดที่ CONFIG ใน data() ด้านล่าง
+  - Input แสดงสถานะ | Output กดสั่งได้เมื่อ PLC อยู่โหมด MANUAL
+
+  ตัวแปรหลัก:
+    plcState.inputBits / outputBits   อาร์เรย์ true/false ของแต่ละจุด (ตัวแรกคือ I0.0 / Q0.0)
+    plcState.hasPlcData               true เมื่อเคยได้ข้อมูลจริงจาก PLC แล้ว
+    plcState.rawValues                ค่าดิบที่อ่านได้ (ใช้ตรวจสอบปัญหา)
+    inputPoints / outputPoints        รายการจุด (address + ชื่อ + ติดหรือดับ) สำหรับแสดงผล
+*/
+export default {
+  data() {
+    return {
+      // ==================== CONFIG (แก้ตรงนี้) ====================
+      // ชื่อเรียงตามลำดับ I0.0, I0.1, ... I0.7, I1.0, ... (ตัวแรกคือ I0.0)
+      INPUT_NAMES: [
+        'DI 00', 'DI 01', 'DI 02', 'DI 03', 'DI 04', 'DI 05', 'DI 06',
+        'DI 07', 'DI 08', 'DI 09', 'DI 10', 'DI 11', 'DI 12', 'DI 13'
+      ],
+      // ชื่อเรียงตามลำดับ Q0.0, Q0.1, ... Q0.7, Q1.0, ...
+      OUTPUT_NAMES: [
+        'DO 00', 'DO 01', 'DO 02', 'DO 03', 'DO 04',
+        'DO 05', 'DO 06', 'DO 07', 'DO 08', 'DO 09'
+      ],
+      // =============================================================
+
+      // ---- นาฬิกา ----
+      clockText: '',
+      clockTimer: null,
+
+      // ---- ข้อมูลจาก PLC / Node-RED ----
+      plcState: {
+        inputBits: [], outputBits: [],
+        manual: false, running: false, fault: false,
+        hasPlcData: false, errorText: '', rawValues: {}
+      }
+    }
+  },
+
+  // ==================== ค่าที่คำนวณ ====================
+  computed: {
+    // ---------- รายการจุด Input / Output (ชื่อ + address + สถานะ) ----------
+    inputPoints() {
+      return this.INPUT_NAMES.map((name, bitNumber) => ({
+        address: 'I' + (bitNumber >> 3) + '.' + (bitNumber & 7),
+        name,
+        isOn: !!this.plcState.inputBits[bitNumber]
+      }))
+    },
+    outputPoints() {
+      return this.OUTPUT_NAMES.map((name, bitNumber) => ({
+        address: 'Q' + (bitNumber >> 3) + '.' + (bitNumber & 7),
+        name,
+        isOn: !!this.plcState.outputBits[bitNumber]
+      }))
+    },
+    inputsOnCount()  { return this.inputPoints.filter(point => point.isOn).length },
+    outputsOnCount() { return this.outputPoints.filter(point => point.isOn).length },
+
+    // ---------- ป้ายสถานะมุมขวาบน ----------
+    // ถ้ายังไม่ได้ข้อมูลจาก PLC จะไม่แสดง AUTO หลอกๆ
+    statusBadge() {
+      if (!this.plcState.hasPlcData) return { cssClass: 'tag-gray', text: 'NO DATA FROM PLC' }
+      const modeName = this.plcState.manual ? 'MANUAL' : 'AUTO'
+      if (this.plcState.fault) return { cssClass: 'tag-amber', text: modeName + ' · FAULT' }
+      return this.plcState.running
+        ? { cssClass: 'tag-green', text: modeName + ' · RUNNING' }
+        : { cssClass: 'tag-red', text: modeName + ' · STOPPED' }
+    },
+
+    // ---------- สิทธิ์สั่ง Output ----------
+    // สั่งได้ต่อเมื่อได้ข้อมูลจาก PLC แล้ว และอยู่โหมด MANUAL
+    canCommandOutputs() {
+      return this.plcState.hasPlcData && this.plcState.manual
+    },
+
+    // ข้อความใต้หัวการ์ด Output บอกสถานะ/เหตุผลที่กดไม่ได้
+    outputHint() {
+      if (!this.plcState.hasPlcData) {
+        return { isWarning: true, text: 'ยังไม่ได้รับข้อมูลจาก PLC · ตรวจ IP, PUT/GET และข้อความ error ด้านบน' }
+      }
+      if (!this.canCommandOutputs) {
+        return { isWarning: true, text: 'AUTO · สั่ง Output ไม่ได้ สลับเป็น MANUAL ที่หน้า Control ก่อน' }
+      }
+      return { isWarning: false, text: 'MANUAL · กดที่จุดเพื่อสั่ง ON / OFF' }
+    },
+
+    // ---------- บรรทัดค่าดิบ ----------
+    rawValuesText() {
+      const rawValues = this.plcState.rawValues || {}
+      return Object.keys(rawValues).length
+        ? JSON.stringify(rawValues)
+        : 'ไม่มีข้อมูลดิบ (s7 in ยังไม่ส่งค่ามา)'
+    }
+  },
+
+  // ==================== รับข้อมูลเข้า ====================
+  watch: {
+    msg(message) { this.applyMessage(message) }
+  },
+
+  // ==================== วงจรชีวิตของหน้า ====================
+  mounted() {
+    // เปิดหน้าใหม่ (เช่น สลับหน้ากลับมา) ใช้ค่าล่าสุดที่ค้างอยู่ทันที
+    if (this.msg) this.applyMessage(this.msg)
+
+    // นาฬิกาเดินทุกวินาที
+    const updateClock = () => { this.clockText = new Date().toLocaleString('th-TH', { hourCycle: 'h23' }) }
+    updateClock()
+    this.clockTimer = setInterval(updateClock, 1000)
+  },
+  beforeUnmount() {
+    clearInterval(this.clockTimer)
+  },
+
+  // ==================== ฟังก์ชัน ====================
+  methods: {
+    // รับสถานะที่ Node-RED ส่งมา (payload เป็น object รวมทุกค่า) แล้วเก็บเข้า plcState
+    applyMessage(message) {
+      const payload = message && message.payload
+      if (!payload || typeof payload !== 'object') return
+
+      if (Array.isArray(payload.inputBits)) {
+        this.plcState.inputBits = payload.inputBits
+        this.plcState.hasPlcData = true                 // ได้ข้อมูลจริงแล้ว
+      }
+      if (Array.isArray(payload.outputBits))        this.plcState.outputBits = payload.outputBits
+      if (typeof payload.manual === 'boolean')      this.plcState.manual = payload.manual
+      if (typeof payload.running === 'boolean')     this.plcState.running = payload.running
+      if (typeof payload.fault === 'boolean')       this.plcState.fault = payload.fault
+      if (typeof payload.errorText === 'string')    this.plcState.errorText = payload.errorText
+      if (payload.rawValues && typeof payload.rawValues === 'object') this.plcState.rawValues = payload.rawValues
+    },
+
+    // กดจุด Output: ส่งค่าตรงข้ามกับสถานะปัจจุบัน (topic เช่น output_q0_0, output_q0_1, ... output_q1_1)
+    // flow ฝั่งเซิร์ฟเวอร์ตรวจโหมด MANUAL ซ้ำอีกชั้นก่อนเขียนลง PLC
+    toggleOutput(outputIndex) {
+      if (!this.canCommandOutputs) return
+      const topic = 'output_q' + (outputIndex >> 3) + '_' + (outputIndex & 7)
+      this.send({ topic, payload: !this.outputPoints[outputIndex].isOn })
+    }
+  }
+}
+</script>
+
+<style scoped>
+/* ==================== พื้นฐาน / การจัดวางทั้งหน้า ==================== */
+.io-page {
+  background: #0b1220;
+  color: #e5e7eb;
+  font-family: 'Segoe UI', system-ui, sans-serif;
+  padding: 20px;
+  border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  box-sizing: border-box;
+}
+.columns {                                        /* Input ซ้าย / Output ขวา */
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 20px;
+}
+
+/* ==================== Header ==================== */
+.page-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding: 0 4px;
+}
+.page-title { font-size: 22px; font-weight: 700; }
+.header-right { display: flex; align-items: center; gap: 14px; }
+.clock-text { font-size: 13px; color: #9ca3af; }
+
+/* ==================== การ์ด ==================== */
+.card {
+  flex: 1 1 420px;
+  min-width: 0;
+  background: #111a2b;
+  border: 1px solid #1f2a3d;
+  border-radius: 10px;
+  padding: 20px;
+  box-sizing: border-box;
+}
+.card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 14px;
+}
+.card-label {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: .8px;
+  color: #9ca3af;
+  margin: 0;
+}
+.count-text { font-size: 13px; color: #9ca3af; }
+.count-text b { color: #e5e7eb; }
+
+/* ข้อความใต้หัวการ์ด Output */
+.hint-text { font-size: 12px; color: #9ca3af; margin: -6px 0 12px; }
+.hint-text.warning { color: #fbbf24; }
+
+/* ==================== ตารางจุด IO (2 คอลัมน์ เรียงลงตามลำดับ) ==================== */
+.point-grid {
+  display: grid;
+  grid-auto-flow: column;
+  grid-template-rows: repeat(var(--rows), auto);
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+.point-tile {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 48px;
+  padding: 12px 14px;
+  background: #0b1220;
+  border: 1px solid #1f2a3d;
+  border-radius: 8px;
+  box-sizing: border-box;
+}
+.point-tile.point-button {                        /* จุด Output ที่กดได้ */
+  width: 100%;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.point-tile.point-button:hover:not(:disabled) { border-color: #2563eb; }
+.point-tile.point-button:disabled { cursor: not-allowed; opacity: .6; }
+
+/* หลอดไฟของแต่ละจุด */
+.lamp-dot {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  flex: none;
+  background: #374151;                            /* ดับ */
+  transition: all .2s;
+}
+.lamp-dot.green { background: #22c55e; box-shadow: 0 0 10px #22c55e; }   /* Input ติด */
+.lamp-dot.amber { background: #f59e0b; box-shadow: 0 0 10px #f59e0b; }   /* Output ติด */
+
+/* ข้อความในแต่ละจุด */
+.point-address {
+  min-width: 42px;
+  font-family: Consolas, Menlo, monospace;
+  font-size: 15px;
+  font-weight: 600;
+}
+.point-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  color: #9ca3af;
+}
+.state-pill {                                     /* ป้าย ON / OFF */
+  font-size: 11px;
+  font-weight: 700;
+  padding: 2px 9px;
+  border-radius: 999px;
+  border: 1px solid;
+}
+.state-pill.on  { color: #22c55e; border-color: rgba(34, 197, 94, .4); background: rgba(34, 197, 94, .12); }
+.state-pill.off { color: #9ca3af; border-color: #2b3a52; }
+
+/* ==================== แถบ error และบรรทัดค่าดิบ ==================== */
+.error-bar {
+  background: rgba(239, 68, 68, .12);
+  border: 1px solid rgba(239, 68, 68, .4);
+  color: #fca5a5;
+  border-radius: 8px;
+  padding: 10px 14px;
+  font-size: 13px;
+  word-break: break-word;
+}
+.raw-text {
+  padding: 0 4px;
+  font-family: Consolas, Menlo, monospace;
+  font-size: 11px;
+  color: #6b7280;
+  word-break: break-all;
+}
+
+/* ==================== ป้ายสี (tag) ใช้ร่วมกัน ==================== */
+.tag {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 10px;
+  border-radius: 999px;
+  border: 1px solid;
+}
+.tag-green { color: #22c55e; border-color: rgba(34, 197, 94, .4);  background: rgba(34, 197, 94, .12); }
+.tag-red   { color: #f87171; border-color: rgba(239, 68, 68, .4);  background: rgba(239, 68, 68, .12); }
+.tag-amber { color: #fbbf24; border-color: rgba(245, 158, 11, .4); background: rgba(245, 158, 11, .12); }
+.tag-gray  { color: #9ca3af; border-color: #2b3a52; }          /* ยังไม่มีข้อมูล */
+
+/* ==================== จอแคบ (มือถือ): เรียงจุดเป็นคอลัมน์เดียว ==================== */
+@media (max-width: 560px) {
+  .point-grid {
+    grid-auto-flow: row;
+    grid-template-rows: none;
+    grid-template-columns: 1fr;
+  }
+}
+</style>

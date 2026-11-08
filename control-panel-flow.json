@@ -1,0 +1,321 @@
+[
+ {
+  "id": "cp_tab",
+  "type": "tab",
+  "label": "Control Panel",
+  "disabled": false,
+  "info": ""
+ },
+ {
+  "id": "s7ep1",
+  "type": "s7 endpoint",
+  "transport": "iso-on-tcp",
+  "address": "192.168.0.1",
+  "port": "102",
+  "rack": "0",
+  "slot": "1",
+  "localtsaphi": "01",
+  "localtsaplo": "00",
+  "remotetsaphi": "01",
+  "remotetsaplo": "00",
+  "connmode": "rack-slot",
+  "adapter": "",
+  "busaddr": "2",
+  "cycletime": "500",
+  "timeout": "2000",
+  "name": "PLC",
+  "vartable": [
+   {
+    "addr": "DB1,X0.0",
+    "name": "start"
+   },
+   {
+    "addr": "DB1,X0.1",
+    "name": "stop"
+   },
+   {
+    "addr": "DB1,X0.2",
+    "name": "manual"
+   },
+   {
+    "addr": "DB1,X0.3",
+    "name": "running"
+   },
+   {
+    "addr": "DB1,X0.4",
+    "name": "fault"
+   },
+   {
+    "addr": "DB1,INT2",
+    "name": "setpoint"
+   },
+   {
+    "addr": "DB1,INT4",
+    "name": "goodWp"
+   },
+   {
+    "addr": "DB1,INT6",
+    "name": "ngWp"
+   },
+   {
+    "addr": "DB1,X0.5",
+    "name": "reset"
+   }
+  ]
+ },
+ {
+  "id": "tpl1",
+  "type": "ui-template",
+  "z": "cp_tab",
+  "group": "",
+  "page": "",
+  "ui": "",
+  "name": "Control Panel",
+  "order": 0,
+  "width": "12",
+  "height": "0",
+  "head": "",
+  "format": "<template>\n  <div class=\"control-page\">\n\n    <!-- ============ HEADER ============ -->\n    <div class=\"page-header\">\n      <span class=\"page-title\">Control</span>\n      <div class=\"header-right\">\n        <span class=\"clock-text\">{{ clockText }}</span>\n        <span class=\"tag\" :class=\"statusBadge.cssClass\">{{ statusBadge.text }}</span>\n      </div>\n    </div>\n\n    <div class=\"page-layout\">\n\n      <!-- ============ คอลัมน์ซ้าย: ปุ่มควบคุม ============ -->\n      <div class=\"left-column\">\n\n        <!-- MODE: สลับ Manual / Auto -->\n        <div class=\"card\">\n          <p class=\"card-label\">MODE</p>\n          <div class=\"mode-switch\">\n            <button type=\"button\" :class=\"{ active: plcState.manual }\" :aria-pressed=\"plcState.manual\"\n              @click=\"setManualMode(true)\">MANUAL</button>\n            <button type=\"button\" :class=\"{ active: !plcState.manual }\" :aria-pressed=\"!plcState.manual\"\n              @click=\"setManualMode(false)\">AUTO</button>\n          </div>\n        </div>\n\n        <!-- COMMAND: กดค้างส่ง true ปล่อยส่ง false (วนจากรายการ COMMAND_BUTTONS) -->\n        <div class=\"card\">\n          <p class=\"card-label\">COMMAND · กดค้างส่ง ปล่อยหยุด</p>\n          <div class=\"command-row\">\n            <button v-for=\"button in COMMAND_BUTTONS\" :key=\"button.name\" type=\"button\"\n              class=\"command-button\" :class=\"[button.name, { 'is-held': heldButtons[button.name] }]\"\n              @pointerdown.prevent=\"pressCommand(button.name, $event)\"\n              @pointerup=\"releaseCommand(button.name)\"\n              @pointercancel=\"releaseCommand(button.name)\"\n              @lostpointercapture=\"releaseCommand(button.name)\"\n              @keydown.space.prevent=\"pressCommand(button.name)\"\n              @keydown.enter.prevent=\"pressCommand(button.name)\"\n              @keyup.space=\"releaseCommand(button.name)\"\n              @keyup.enter=\"releaseCommand(button.name)\"\n              @contextmenu.prevent>{{ button.label }}</button>\n          </div>\n          <p class=\"address-text\">{{ commandAddressText }}</p>\n        </div>\n\n        <!-- SETPOINT: ป้อนตัวเลขแล้วกด SEND -->\n        <div class=\"card\">\n          <p class=\"card-label\">SETPOINT · ป้อนค่าส่งไป PLC</p>\n          <label for=\"setpoint-input\" class=\"field-label\">\n            ค่าที่ต้องการส่ง ({{ SETPOINT_CONFIG.min }}–{{ SETPOINT_CONFIG.max }} {{ SETPOINT_CONFIG.unit }})\n          </label>\n          <div class=\"setpoint-row\">\n            <div class=\"setpoint-box\" :class=\"{ invalid: !isSetpointValid }\">\n              <input id=\"setpoint-input\" type=\"number\" inputmode=\"numeric\" step=\"1\"\n                :min=\"SETPOINT_CONFIG.min\" :max=\"SETPOINT_CONFIG.max\"\n                v-model=\"setpointInput\" @keyup.enter=\"sendSetpoint\" />\n              <span class=\"unit-text\">{{ SETPOINT_CONFIG.unit }}</span>\n            </div>\n            <button type=\"button\" class=\"send-button\" :disabled=\"!isSetpointValid\" @click=\"sendSetpoint\">SEND</button>\n          </div>\n          <p class=\"error-text\" v-if=\"!isSetpointValid\">\n            ใส่เลขจำนวนเต็มระหว่าง {{ SETPOINT_CONFIG.min }} ถึง {{ SETPOINT_CONFIG.max }}\n          </p>\n          <p class=\"address-text\">\n            ค่าปัจจุบันใน PLC: {{ formatNumber(plcState.setpoint) }} · SEND → {{ SETPOINT_CONFIG.address }} (INT)\n          </p>\n        </div>\n\n        <!-- STATUS: หลอดไฟสถานะ -->\n        <div class=\"card\">\n          <p class=\"card-label\">STATUS</p>\n          <div class=\"lamp-grid\">\n            <div class=\"lamp-item\" v-for=\"lamp in statusLamps\" :key=\"lamp.label\">\n              <span class=\"lamp-dot\" :class=\"lamp.isOn ? lamp.color : 'off'\"></span>{{ lamp.label }}\n            </div>\n          </div>\n        </div>\n\n      </div>\n\n      <!-- ============ คอลัมน์ขวา: Command log ============ -->\n      <div class=\"card log-card\">\n        <div class=\"log-header\">\n          <p class=\"card-label card-label-flat\">COMMAND LOG</p>\n          <button type=\"button\" class=\"clear-button\" @click=\"clearCommandLog\">CLEAR</button>\n        </div>\n        <p class=\"empty-text\" v-if=\"!commandLog.length\">ยังไม่มีเหตุการณ์ RUN / STOP / FAULT</p>\n        <div class=\"log-row\" v-for=\"entry in commandLog\" :key=\"entry.id\">\n          <span class=\"time-text\">{{ formatLogTime(entry) }}</span>\n          <span>{{ entry.message }} <span class=\"address-text address-inline\">{{ entry.address }}</span></span>\n          <span class=\"tag\" :class=\"'tag-' + entry.color\">{{ entry.label }}</span>\n        </div>\n      </div>\n\n    </div>\n  </div>\n</template>\n\n<script>\n/*\n  CONTROL PANEL  ·  Dashboard 2.0 ui-template\n  - ค่าที่แก้บ่อยอยู่ที่ CONFIG ใน data() ด้านล่าง (ช่วงค่า, หน่วย, address ที่แสดง)\n  - ส่วนหน้าตา = บล็อก template | การทำงาน = บล็อก script นี้ | สี/การจัดวาง = บล็อก style\n\n  ตัวแปรหลัก:\n    plcState       สถานะที่อ่านมาจาก PLC (manual, running, fault, setpoint, plcConnected)\n    commandLog     รายการเหตุการณ์ RUN / STOP / FAULT ที่ Node-RED บันทึกไว้\n    setpointInput  ตัวเลขที่ผู้ใช้พิมพ์ในช่อง Setpoint\n    heldButtons    บอกว่าปุ่มคำสั่งไหนกำลังถูกกดค้างอยู่\n*/\nexport default {\n  data() {\n    // ==================== CONFIG (แก้ตรงนี้) ====================\n    // address ในรายการนี้ใช้ \"แสดงบนหน้าจอ\" เท่านั้น\n    // ตัวที่ส่งค่าไป PLC จริงตั้งที่ s7 endpoint ใน Node-RED\n    const SETPOINT_CONFIG = { min: 0, max: 100, unit: '%', address: 'DB1.DBW2' }\n\n    const COMMAND_BUTTONS = [\n      { name: 'start', label: 'START', address: 'DB1.DBX0.0' },\n      { name: 'stop',  label: 'STOP',  address: 'DB1.DBX0.1' },\n      { name: 'reset', label: 'RESET', address: 'DB1.DBX0.5' }\n    ]\n    // =============================================================\n\n    return {\n      SETPOINT_CONFIG,\n      COMMAND_BUTTONS,\n\n      // ---- นาฬิกา ----\n      clockText: '',\n      clockTimer: null,\n\n      // ---- ปุ่มและช่องกรอก ----\n      setpointInput: 0,                                                       // ค่าในช่อง Setpoint\n      heldButtons: Object.fromEntries(COMMAND_BUTTONS.map(b => [b.name, false])), // ปุ่มไหนถูกกดค้างอยู่\n\n      // ---- ข้อมูลจาก PLC / Node-RED ----\n      commandLog: [],\n      plcState: { manual: false, running: false, fault: false, setpoint: null, plcConnected: false }\n    }\n  },\n\n  // ==================== ค่าที่คำนวณ ====================\n  computed: {\n    // Setpoint ต้องเป็นจำนวนเต็มในช่วงที่กำหนด\n    isSetpointValid() {\n      if (this.setpointInput === '' || this.setpointInput === null) return false\n      const value = Number(this.setpointInput)\n      return Number.isInteger(value) && value >= this.SETPOINT_CONFIG.min && value <= this.SETPOINT_CONFIG.max\n    },\n\n    // ป้ายสถานะมุมขวาบน เช่น \"MANUAL · RUNNING\"\n    statusBadge() {\n      const modeName = this.plcState.manual ? 'MANUAL' : 'AUTO'\n      if (this.plcState.fault) return { cssClass: 'tag-amber', text: modeName + ' · FAULT' }\n      return this.plcState.running\n        ? { cssClass: 'tag-green', text: modeName + ' · RUNNING' }\n        : { cssClass: 'tag-red', text: modeName + ' · STOPPED' }\n    },\n\n    // หลอดไฟ: isOn = เงื่อนไขที่ทำให้ติด, color = สีตอนติด (green / red / amber)\n    statusLamps() {\n      const state = this.plcState\n      return [\n        { label: 'RUN',      isOn: state.running,      color: 'green' },\n        { label: 'STOP',     isOn: !state.running,     color: 'red' },\n        { label: 'MANUAL',   isOn: state.manual,       color: 'amber' },\n        { label: 'AUTO',     isOn: !state.manual,      color: 'amber' },\n        { label: 'FAULT',    isOn: state.fault,        color: 'red' },\n        { label: 'PLC LINK', isOn: state.plcConnected, color: 'green' }\n      ]\n    },\n\n    // ข้อความ address ใต้ปุ่มคำสั่ง\n    commandAddressText() {\n      return this.COMMAND_BUTTONS.map(b => b.label + ' → ' + b.address).join(' · ')\n    }\n  },\n\n  // ==================== รับข้อมูลเข้า ====================\n  watch: {\n    msg(message) { this.applyMessage(message) }\n  },\n\n  // ==================== วงจรชีวิตของหน้า ====================\n  mounted() {\n    // เปิดหน้าใหม่ (เช่น สลับหน้ากลับมา) ใช้ค่าล่าสุดที่ค้างอยู่ทันที\n    if (this.msg) this.applyMessage(this.msg)\n\n    // นาฬิกาเดินทุกวินาที\n    const updateClock = () => { this.clockText = new Date().toLocaleString('th-TH', { hourCycle: 'h23' }) }\n    updateClock()\n    this.clockTimer = setInterval(updateClock, 1000)\n\n    // ถ้าหน้าหลุดโฟกัสขณะกดค้าง ให้ปล่อยปุ่มเอง (กันค่า true ค้างใน PLC)\n    window.addEventListener('blur', this.releaseAllCommands)\n    document.addEventListener('visibilitychange', this.releaseAllCommands)\n  },\n  beforeUnmount() {\n    clearInterval(this.clockTimer)\n    window.removeEventListener('blur', this.releaseAllCommands)\n    document.removeEventListener('visibilitychange', this.releaseAllCommands)\n    this.releaseAllCommands()\n  },\n\n  // ==================== ฟังก์ชัน ====================\n  methods: {\n    // ---------- รับข้อมูล ----------\n    // รับสถานะและ log ที่ Node-RED ส่งมา (payload เป็น object รวมทุกค่า)\n    applyMessage(message) {\n      if (!message) return\n      const payload = message.payload\n      if (payload && typeof payload === 'object' && !Array.isArray(payload)) {\n        const { commandLog, ...plcValues } = payload\n        if (Array.isArray(commandLog)) this.commandLog = commandLog\n        Object.assign(this.plcState, plcValues)\n      } else if (typeof message.topic === 'string' && message.topic in this.plcState) {\n        this.plcState[message.topic] = payload          // กรณีส่งมาทีละค่า\n      }\n    },\n\n    // ---------- ส่งคำสั่งไป PLC ----------\n    // กดปุ่ม: ส่ง true (ทำงานครั้งเดียวต่อการกดหนึ่งครั้ง)\n    pressCommand(commandName, event) {\n      if (this.heldButtons[commandName]) return\n      if (event && event.currentTarget && event.pointerId !== undefined) {\n        // จับ pointer ไว้ เพื่อให้ได้ event \"ปล่อย\" แม้ลากเมาส์/นิ้วออกนอกปุ่ม\n        try { event.currentTarget.setPointerCapture(event.pointerId) } catch (error) {}\n      }\n      this.heldButtons[commandName] = true\n      this.send({ topic: commandName, payload: true })\n    },\n    // ปล่อยปุ่ม: ส่ง false\n    releaseCommand(commandName) {\n      if (!this.heldButtons[commandName]) return\n      this.heldButtons[commandName] = false\n      this.send({ topic: commandName, payload: false })\n    },\n    // ปล่อยทุกปุ่มที่ค้างอยู่\n    releaseAllCommands() {\n      this.COMMAND_BUTTONS.forEach(button => this.releaseCommand(button.name))\n    },\n    // สลับโหมด Manual (true) / Auto (false)\n    setManualMode(isManual) {\n      this.plcState.manual = isManual\n      this.send({ topic: 'set_manual_mode', payload: isManual })\n    },\n    // ส่งค่า Setpoint (เฉพาะเมื่อค่าถูกต้อง)\n    sendSetpoint() {\n      if (!this.isSetpointValid) return\n      this.send({ topic: 'setpoint', payload: Number(this.setpointInput) })\n    },\n\n    // ---------- Command log ----------\n    clearCommandLog() {\n      this.send({ topic: 'clear_command_log' })\n    },\n    // เวลาของแถว log (Node-RED บันทึกเป็น timestamp)\n    formatLogTime(entry) {\n      return new Date(entry.timestamp).toLocaleTimeString('th-TH', { hourCycle: 'h23' })\n    },\n\n    // ---------- ตัวช่วยแสดงผล ----------\n    formatNumber(value) {\n      return typeof value === 'number' ? String(value) : '--'\n    }\n  }\n}\n</script>\n\n<style scoped>\n/* ==================== พื้นฐาน / การจัดวางทั้งหน้า ==================== */\n.control-page {\n  background: #0b1220;\n  color: #e5e7eb;\n  font-family: 'Segoe UI', system-ui, sans-serif;\n  padding: 20px;\n  border-radius: 8px;\n  display: flex;\n  flex-direction: column;\n  gap: 20px;\n  box-sizing: border-box;\n}\n.page-layout {\n  display: flex;\n  flex-wrap: wrap;\n  align-items: stretch;\n  gap: 20px;\n}\n.left-column {\n  flex: 1 1 360px;\n  min-width: 0;\n  display: flex;\n  flex-direction: column;\n  gap: 20px;\n}\n\n/* ==================== Header ==================== */\n.page-header {\n  display: flex;\n  align-items: center;\n  justify-content: space-between;\n  flex-wrap: wrap;\n  gap: 12px;\n  padding: 0 4px;\n}\n.page-title { font-size: 22px; font-weight: 700; }\n.header-right { display: flex; align-items: center; gap: 14px; }\n.clock-text { font-size: 13px; color: #9ca3af; }\n\n/* ==================== การ์ดและข้อความทั่วไป ==================== */\n.card {\n  background: #111a2b;\n  border: 1px solid #1f2a3d;\n  border-radius: 10px;\n  padding: 20px;\n  box-sizing: border-box;\n}\n.card-label {\n  font-size: 12px;\n  font-weight: 600;\n  letter-spacing: .8px;\n  color: #9ca3af;\n  margin: 0 0 14px;\n}\n.card-label-flat { margin: 0; }\n.field-label { display: block; font-size: 13px; color: #9ca3af; margin-bottom: 8px; }\n.address-text {\n  font-family: Consolas, Menlo, monospace;\n  font-size: 12px;\n  color: #9ca3af;\n  margin: 12px 0 0;\n}\n.address-inline { margin: 0; }\n.empty-text { font-size: 13px; color: #9ca3af; }\n.error-text { font-size: 12px; color: #f87171; margin: 8px 0 0; }\n\n/* ==================== MODE (สวิตช์ Manual / Auto) ==================== */\n.mode-switch {\n  display: flex;\n  gap: 4px;\n  padding: 4px;\n  background: #0b1220;\n  border: 1px solid #1f2a3d;\n  border-radius: 8px;\n}\n.mode-switch button {\n  flex: 1;\n  min-height: 48px;\n  border: 0;\n  border-radius: 6px;\n  background: transparent;\n  color: #9ca3af;\n  font-size: 15px;\n  font-weight: 700;\n  cursor: pointer;\n}\n.mode-switch button.active { background: #f59e0b; color: #111827; }\n\n/* ==================== COMMAND (START / STOP / RESET) ==================== */\n.command-row { display: flex; gap: 14px; }\n.command-button {\n  flex: 1;\n  min-height: 84px;\n  border: 0;\n  border-radius: 10px;\n  color: #fff;\n  font-size: 20px;\n  font-weight: 700;\n  letter-spacing: 1px;\n  cursor: pointer;\n  user-select: none;\n  -webkit-user-select: none;\n  touch-action: none;\n  transition: transform .08s, filter .08s;\n}\n.command-button.start { background: #16a34a; }\n.command-button.stop  { background: #dc2626; }\n.command-button.reset { background: #b45309; }\n.command-button.is-held {                     /* ขณะกดค้าง */\n  transform: scale(.97);\n  filter: brightness(1.25);\n  box-shadow: 0 0 0 3px rgba(255, 255, 255, .35);\n}\n\n/* ==================== SETPOINT ==================== */\n.setpoint-row { display: flex; align-items: stretch; gap: 12px; }\n.setpoint-box {\n  flex: 1;\n  display: flex;\n  align-items: center;\n  min-height: 52px;\n  padding: 0 14px;\n  background: #0b1220;\n  border: 1px solid #2b3a52;\n  border-radius: 8px;\n}\n.setpoint-box.invalid { border-color: #ef4444; }\n.setpoint-box input {\n  flex: 1;\n  min-width: 0;\n  background: transparent;\n  border: 0;\n  outline: 0;\n  color: #e5e7eb;\n  font-size: 22px;\n  font-weight: 600;\n  font-family: Consolas, Menlo, monospace;\n}\n.unit-text { font-size: 14px; color: #9ca3af; }\n.send-button {\n  min-width: 110px;\n  min-height: 52px;\n  border: 0;\n  border-radius: 8px;\n  background: #2563eb;\n  color: #fff;\n  font-size: 16px;\n  font-weight: 700;\n  letter-spacing: 1px;\n  cursor: pointer;\n}\n.send-button:disabled { background: #374151; color: #9ca3af; cursor: not-allowed; }\n\n/* ==================== STATUS (หลอดไฟ) ==================== */\n.lamp-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px 24px; }\n.lamp-item { display: flex; align-items: center; gap: 10px; font-size: 14px; }\n.lamp-dot {\n  width: 16px;\n  height: 16px;\n  border-radius: 50%;\n  flex: none;\n  background: #374151;                          /* ดับ */\n  transition: all .2s;\n}\n.lamp-dot.green { background: #22c55e; box-shadow: 0 0 12px #22c55e; }\n.lamp-dot.red   { background: #ef4444; box-shadow: 0 0 12px #ef4444; }\n.lamp-dot.amber { background: #f59e0b; box-shadow: 0 0 12px #f59e0b; }\n\n/* ==================== COMMAND LOG ==================== */\n.log-card {\n  flex: 1.4 1 420px;\n  min-width: 0;\n  max-height: 760px;\n  display: flex;\n  flex-direction: column;\n  overflow-y: auto;\n}\n.log-header {\n  display: flex;\n  align-items: center;\n  justify-content: space-between;\n  margin-bottom: 6px;\n}\n.clear-button {\n  min-height: 36px;\n  padding: 0 14px;\n  border: 1px solid #1f2a3d;\n  border-radius: 6px;\n  background: transparent;\n  color: #9ca3af;\n  font-size: 12px;\n  font-weight: 600;\n  cursor: pointer;\n}\n.log-row {\n  display: grid;\n  grid-template-columns: 80px 1fr auto;\n  align-items: center;\n  gap: 12px;\n  padding: 10px 0;\n  border-bottom: 1px solid #1f2a3d;\n  font-size: 13px;\n}\n.time-text { font-family: Consolas, Menlo, monospace; color: #9ca3af; }\n\n/* ==================== ป้ายสี (tag) ใช้ร่วมกัน ==================== */\n.tag {\n  font-size: 11px;\n  font-weight: 600;\n  padding: 2px 10px;\n  border-radius: 999px;\n  border: 1px solid;\n}\n.tag-green { color: #22c55e; border-color: rgba(34, 197, 94, .4);  background: rgba(34, 197, 94, .12); }\n.tag-red   { color: #f87171; border-color: rgba(239, 68, 68, .4);  background: rgba(239, 68, 68, .12); }\n.tag-amber { color: #fbbf24; border-color: rgba(245, 158, 11, .4); background: rgba(245, 158, 11, .12); }\n</style>\n",
+  "storeOutMessages": true,
+  "passthru": false,
+  "resendOnRefresh": true,
+  "templateScope": "local",
+  "className": "",
+  "x": 560,
+  "y": 200,
+  "wires": [
+   [
+    "sw1",
+    "logst"
+   ]
+  ]
+ },
+ {
+  "id": "s7in1",
+  "type": "s7 in",
+  "z": "cp_tab",
+  "endpoint": "s7ep1",
+  "mode": "all",
+  "variable": "",
+  "diff": true,
+  "name": "PLC all variables",
+  "x": 150,
+  "y": 120,
+  "wires": [
+   [
+    "map1"
+   ]
+  ]
+ },
+ {
+  "id": "map1",
+  "type": "function",
+  "z": "cp_tab",
+  "name": "Merge state",
+  "func": "// รวมสถานะทั้งหมดเป็นก้อนเดียว เก็บใน flow context ชื่อ 'control_state'\n// เพื่อให้เปิดหน้าใหม่/สลับหน้าแล้วยังได้สถานะครบ ไม่เด้งกลับค่าเริ่มต้น\nconst controlState = flow.get('control_state') || {};\nconst incoming = msg.payload || {};\n['manual', 'running', 'fault', 'setpoint', 'goodWp', 'ngWp', 'plcConnected', 'commandLog'].forEach(key => {\n  if (key in incoming) controlState[key] = incoming[key];\n});\n\n// ---- บันทึก Command Log เฉพาะตอน tag RUN / STOP / FAULT ทำงาน ----\n// (ข้ามค่าที่อ่านได้ครั้งแรกหลังเปิดระบบ จะบันทึกเมื่อสถานะ \"เปลี่ยน\" เท่านั้น)\nconst MAX_LOG_ENTRIES = 50;\nconst newEvents = [];\n\nif (typeof incoming.running === 'boolean') {\n  const previousRunning = flow.get('previous_running');\n  if (previousRunning !== undefined && previousRunning !== incoming.running) {\n    newEvents.push(incoming.running\n      ? { label: 'RUN',  color: 'green', message: 'Machine RUN',  address: 'DB1.DBX0.3 = 1' }\n      : { label: 'STOP', color: 'red',   message: 'Machine STOP', address: 'DB1.DBX0.3 = 0' });\n  }\n  flow.set('previous_running', incoming.running);\n}\nif (typeof incoming.fault === 'boolean') {\n  const previousFault = flow.get('previous_fault');\n  if (previousFault === false && incoming.fault === true) {\n    newEvents.push({ label: 'FAULT', color: 'amber', message: 'FAULT active', address: 'DB1.DBX0.4 = 1' });\n  }\n  flow.set('previous_fault', incoming.fault);\n}\nif (newEvents.length) {\n  const now = Date.now();\n  const commandLog = flow.get('command_log') || [];\n  newEvents.forEach((event, index) => {\n    commandLog.unshift(Object.assign({ id: now + '-' + index, timestamp: now }, event));\n  });\n  if (commandLog.length > MAX_LOG_ENTRIES) commandLog.length = MAX_LOG_ENTRIES;\n  flow.set('command_log', commandLog);\n  controlState.commandLog = commandLog.slice();\n}\nif (!controlState.commandLog) controlState.commandLog = (flow.get('command_log') || []).slice();\n\nflow.set('control_state', controlState);\nreturn { payload: Object.assign({}, controlState) };",
+  "outputs": 1,
+  "x": 370,
+  "y": 80,
+  "wires": [
+   [
+    "tpl1",
+    "mon_tpl"
+   ]
+  ]
+ },
+ {
+  "id": "st1",
+  "type": "status",
+  "z": "cp_tab",
+  "scope": [
+   "s7in1"
+  ],
+  "name": "",
+  "x": 130,
+  "y": 200,
+  "wires": [
+   [
+    "lnk1"
+   ]
+  ]
+ },
+ {
+  "id": "lnk1",
+  "type": "function",
+  "z": "cp_tab",
+  "name": "PLC link",
+  "func": "// เขียว = เชื่อมต่อ PLC อยู่\nconst plcConnected = !!(msg.status && msg.status.fill === 'green');\nreturn { payload: { plcConnected } };",
+  "outputs": 1,
+  "x": 330,
+  "y": 200,
+  "wires": [
+   [
+    "map1"
+   ]
+  ]
+ },
+ {
+  "id": "sw1",
+  "type": "switch",
+  "z": "cp_tab",
+  "name": "route by topic",
+  "property": "topic",
+  "propertyType": "msg",
+  "rules": [
+   {
+    "t": "eq",
+    "v": "start",
+    "vt": "str"
+   },
+   {
+    "t": "eq",
+    "v": "stop",
+    "vt": "str"
+   },
+   {
+    "t": "eq",
+    "v": "set_manual_mode",
+    "vt": "str"
+   },
+   {
+    "t": "eq",
+    "v": "setpoint",
+    "vt": "str"
+   },
+   {
+    "t": "eq",
+    "v": "reset",
+    "vt": "str"
+   }
+  ],
+  "checkall": "true",
+  "repair": false,
+  "outputs": 5,
+  "x": 760,
+  "y": 200,
+  "wires": [
+   [
+    "o_start"
+   ],
+   [
+    "o_stop"
+   ],
+   [
+    "o_mode"
+   ],
+   [
+    "guard1"
+   ],
+   [
+    "o_reset"
+   ]
+  ]
+ },
+ {
+  "id": "o_start",
+  "type": "s7 out",
+  "z": "cp_tab",
+  "endpoint": "s7ep1",
+  "variable": "start",
+  "name": "start",
+  "x": 980,
+  "y": 120,
+  "wires": []
+ },
+ {
+  "id": "o_stop",
+  "type": "s7 out",
+  "z": "cp_tab",
+  "endpoint": "s7ep1",
+  "variable": "stop",
+  "name": "stop",
+  "x": 980,
+  "y": 170,
+  "wires": []
+ },
+ {
+  "id": "o_mode",
+  "type": "s7 out",
+  "z": "cp_tab",
+  "endpoint": "s7ep1",
+  "variable": "manual",
+  "name": "manual",
+  "x": 980,
+  "y": 220,
+  "wires": []
+ },
+ {
+  "id": "guard1",
+  "type": "function",
+  "z": "cp_tab",
+  "name": "Guard 0-100",
+  "func": "// กันค่า Setpoint ที่ไม่ใช่จำนวนเต็มในช่วง 0-100 ไม่ให้ถึง PLC\nconst setpointValue = Number(msg.payload);\nif (!Number.isInteger(setpointValue) || setpointValue < 0 || setpointValue > 100) {\n  node.warn('Setpoint out of range: ' + msg.payload);\n  return null;\n}\nmsg.payload = setpointValue;\nreturn msg;",
+  "outputs": 1,
+  "x": 970,
+  "y": 280,
+  "wires": [
+   [
+    "o_sp"
+   ]
+  ]
+ },
+ {
+  "id": "o_sp",
+  "type": "s7 out",
+  "z": "cp_tab",
+  "endpoint": "s7ep1",
+  "variable": "setpoint",
+  "name": "setpoint",
+  "x": 1160,
+  "y": 280,
+  "wires": []
+ },
+ {
+  "id": "logst",
+  "type": "function",
+  "z": "cp_tab",
+  "name": "Clear log",
+  "func": "// รับคำสั่ง CLEAR จากหน้าจอ: ล้าง Command Log ที่เก็บไว้ แล้วส่งรายการว่างกลับไปแสดง\nif (msg.topic === 'clear_command_log') {\n  flow.set('command_log', []);\n  return { payload: { commandLog: [] } };\n}\nreturn null;",
+  "outputs": 1,
+  "x": 560,
+  "y": 300,
+  "wires": [
+   [
+    "map1"
+   ]
+  ]
+ },
+ {
+  "id": "o_reset",
+  "type": "s7 out",
+  "z": "cp_tab",
+  "endpoint": "s7ep1",
+  "variable": "reset",
+  "name": "reset",
+  "x": 980,
+  "y": 320,
+  "wires": []
+ },
+ {
+  "id": "mon_tpl",
+  "type": "ui-template",
+  "z": "cp_tab",
+  "group": "",
+  "page": "",
+  "ui": "",
+  "name": "WP Monitoring",
+  "order": 1,
+  "width": "12",
+  "height": "0",
+  "head": "",
+  "format": "<template><div class=\"monitoring-card\"><p class=\"card-label\">MONITORING</p><div class=\"monitoring-grid\"><div class=\"monitoring-item\"><span class=\"monitoring-label\">GOOD WP</span><strong>{{ msg && msg.payload && msg.payload.goodWp !== undefined && msg.payload.goodWp !== null ? msg.payload.goodWp : '--' }}</strong><span>DB1.DBW4 (INT)</span></div><div class=\"monitoring-item\"><span class=\"monitoring-label\">NG WP</span><strong>{{ msg && msg.payload && msg.payload.ngWp !== undefined && msg.payload.ngWp !== null ? msg.payload.ngWp : '--' }}</strong><span>DB1.DBW6 (INT)</span></div><div class=\"monitoring-item\"><span class=\"monitoring-label\">WP SET</span><strong>{{ msg && msg.payload && msg.payload.setpoint !== undefined && msg.payload.setpoint !== null ? msg.payload.setpoint : '--' }}</strong><span>DB1.DBW2 (INT)</span></div></div></div></template><style>.monitoring-card{padding:16px;color:#e5e7eb;background:#111a2b;border:1px solid #1f2a3d;border-radius:10px}.card-label{margin:0 0 14px;color:#9ca3af;font-size:12px;font-weight:600;letter-spacing:.8px}.monitoring-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}.monitoring-item{min-width:0;display:flex;flex-direction:column;gap:8px;padding:14px;background:#0b1220;border:1px solid #1f2a3d;border-radius:8px}.monitoring-item span{color:#9ca3af;font-size:12px}.monitoring-item strong{color:#e5e7eb;font:600 28px/1.2 Consolas,Menlo,monospace}@media(max-width:600px){.monitoring-grid{grid-template-columns:1fr}}</style>",
+  "storeOutMessages": true,
+  "passthru": true,
+  "resendOnRefresh": true,
+  "templateScope": "local",
+  "className": "",
+  "x": 570,
+  "y": 130,
+  "wires": []
+ }
+]

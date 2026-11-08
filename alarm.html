@@ -1,0 +1,402 @@
+<template>
+  <div class="alarm-page">
+
+    <!-- ============ HEADER ============ -->
+    <div class="page-header">
+      <span class="page-title">Alarm</span>
+      <div class="header-right">
+        <span class="clock-text">{{ clockText }}</span>
+        <span class="tag" :class="statusBadge.cssClass">{{ statusBadge.text }}</span>
+      </div>
+    </div>
+
+    <!-- แถบแดง: แสดง error ที่ได้จาก PLC (ถ้ามี) -->
+    <div class="error-bar" v-if="plcState.errorText">PLC ERROR · {{ plcState.errorText }}</div>
+
+    <!-- ============ ACTIVE ALARMS: Alarm ที่กำลังเกิดอยู่ ============ -->
+    <div class="card" :class="{ 'has-active': plcState.activeAlarms.length }">
+      <div class="card-header">
+        <div class="header-left">
+          <p class="card-label">ACTIVE ALARMS</p>
+          <span class="count-text">
+            <b :class="{ red: plcState.activeAlarms.length }">{{ plcState.activeAlarms.length }}</b> active ·
+            <b>{{ unacknowledgedCount }}</b> unacknowledged
+          </span>
+        </div>
+        <button type="button" class="action-button primary" :disabled="!unacknowledgedCount"
+          @click="acknowledgeAllAlarms">ACK ALL</button>
+      </div>
+
+      <p class="empty-text" :class="{ warning: !plcState.hasPlcData }" v-if="!plcState.activeAlarms.length">
+        {{ plcState.hasPlcData ? 'ไม่มี Alarm ที่กำลังเกิดขึ้น' : 'ยังไม่ได้รับข้อมูลจาก PLC · ตรวจ IP, ชื่อตัวแปรใน endpoint และข้อความ error ด้านบน' }}
+      </p>
+      <div class="scroll-area" v-else>
+        <div class="active-row" v-for="alarm in plcState.activeAlarms" :key="alarm.index"
+          :style="{ borderLeftColor: alarm.level === 'critical' ? '#ef4444' : '#f59e0b' }">
+          <span class="alarm-id">{{ alarm.plcTagName }}</span>
+          <span class="alarm-name">{{ alarm.name }}</span>
+          <span class="tag" :class="levelTagClass(alarm.level)">{{ alarm.level.toUpperCase() }}</span>
+          <span class="time-text">{{ formatDateTime(alarm.activeSince) }}</span>
+          <span class="tag" :class="alarm.isAcknowledged ? 'tag-green' : 'tag-amber'">
+            {{ alarm.isAcknowledged ? 'ACKNOWLEDGED' : 'UNACKNOWLEDGED' }}
+          </span>
+          <span class="row-action">
+            <button type="button" class="ack-button" v-if="!alarm.isAcknowledged"
+              @click="acknowledgeAlarm(alarm.index)">ACK</button>
+            <span class="time-text" v-else>{{ formatDateTime(alarm.acknowledgedAt) }}</span>
+          </span>
+        </div>
+      </div>
+    </div>
+
+    <!-- ============ ALARM HISTORY: ประวัติทั้งหมด ============ -->
+    <div class="card">
+      <div class="card-header">
+        <div class="header-left">
+          <p class="card-label">ALARM HISTORY</p>
+          <span class="count-text">ล่าสุด <b>{{ plcState.history.length }}</b> รายการ</span>
+        </div>
+        <div class="header-buttons">
+          <button type="button" class="action-button" :disabled="!plcState.history.length"
+            @click="exportHistoryCsv">EXPORT CSV</button>
+          <button type="button" class="action-button" :disabled="!plcState.history.length"
+            @click="clearAlarmHistory">CLEAR</button>
+        </div>
+      </div>
+
+      <p class="empty-text" v-if="!plcState.history.length">ยังไม่มีประวัติ Alarm</p>
+      <div class="scroll-area" v-else>
+        <div class="history-head">
+          <span>TIME IN</span><span>TIME OUT</span><span>DURATION</span><span>ID</span>
+          <span>DESCRIPTION</span><span>LEVEL</span><span>ACK AT</span>
+        </div>
+        <div class="history-row" v-for="entry in plcState.history" :key="entry.eventId">
+          <span class="time-text">{{ formatDateTime(entry.startedAt) }}</span>
+          <span v-if="entry.endedAt === null"><span class="tag tag-red">ACTIVE</span></span>
+          <span class="time-text" v-else>{{ formatDateTime(entry.endedAt) }}</span>
+          <span class="time-text">{{ formatDuration(entry) }}</span>
+          <span class="alarm-id">{{ entry.plcTagName }}</span>
+          <span class="alarm-name">{{ entry.name }}</span>
+          <span class="tag" :class="levelTagClass(entry.level)">{{ entry.level.toUpperCase() }}</span>
+          <span class="time-text">{{ entry.acknowledgedAt ? formatDateTime(entry.acknowledgedAt) : '—' }}</span>
+        </div>
+      </div>
+    </div>
+
+
+    <!-- บรรทัดตรวจสอบ: ค่าดิบที่ Node-RED อ่านได้จาก PLC (ลบบรรทัดนี้ได้เมื่อใช้งานปกติแล้ว) -->
+    <div class="raw-text">RAW · {{ rawValuesText }}</div>
+  </div>
+</template>
+
+<script>
+/*
+  ALARM  ·  Dashboard 2.0 ui-template
+  - ชื่อและระดับของแต่ละ Alarm ตั้งที่โหนด function ชื่อ Alarm engine ใน flow (ไม่ใช่ในไฟล์นี้)
+  - หน้านี้แค่แสดงผล และส่งคำสั่ง ACK / CLEAR กลับไปให้ Node-RED
+
+  ตัวแปรหลัก:
+    plcState.activeAlarms   Alarm ที่กำลังเกิดอยู่ (index, plcTagName, name, level, activeSince, isAcknowledged, acknowledgedAt)
+    plcState.history        ประวัติ (eventId, index, plcTagName, name, level, startedAt, endedAt, acknowledgedAt)
+                            endedAt เป็น null = ยังไม่หาย
+    plcTagName              ชื่อตัวแปรใน DB3 เช่น error1 (ตั้งที่โหนด Alarm engine)
+    plcState.hasPlcData     true เมื่อเคยได้ข้อมูลจริงจาก PLC แล้ว
+    plcState.rawValues      ค่าดิบที่อ่านได้ (ใช้ตรวจสอบปัญหา)
+*/
+export default {
+  data() {
+    return {
+      // ---- นาฬิกา ----
+      clockText: '',
+      clockTimer: null,
+
+      // ---- ข้อมูลจาก Node-RED ----
+      plcState: {
+        hasPlcData: false, errorText: '',
+        manual: false, running: false, fault: false,
+        activeAlarms: [], history: [], rawValues: {}
+      }
+    }
+  },
+
+  // ==================== ค่าที่คำนวณ ====================
+  computed: {
+    // จำนวน Alarm ที่ยังไม่กดรับทราบ
+    unacknowledgedCount() {
+      return this.plcState.activeAlarms.filter(alarm => !alarm.isAcknowledged).length
+    },
+
+    // บรรทัดค่าดิบ เช่น {"alarm_byte0":1,"manual":true}
+    rawValuesText() {
+      const rawValues = this.plcState.rawValues || {}
+      return Object.keys(rawValues).length
+        ? JSON.stringify(rawValues)
+        : 'ไม่มีข้อมูลดิบ (s7 in ยังไม่ส่งค่ามา)'
+    },
+
+    // ป้ายสถานะมุมขวาบน (เหมือนหน้า Control / IO Status)
+    statusBadge() {
+      if (!this.plcState.hasPlcData) return { cssClass: 'tag-gray', text: 'NO DATA FROM PLC' }
+      const modeName = this.plcState.manual ? 'MANUAL' : 'AUTO'
+      if (this.plcState.fault) return { cssClass: 'tag-amber', text: modeName + ' · FAULT' }
+      return this.plcState.running
+        ? { cssClass: 'tag-green', text: modeName + ' · RUNNING' }
+        : { cssClass: 'tag-red', text: modeName + ' · STOPPED' }
+    }
+  },
+
+  // ==================== รับข้อมูลเข้า ====================
+  watch: {
+    msg(message) { this.applyMessage(message) }
+  },
+
+  // ==================== วงจรชีวิตของหน้า ====================
+  mounted() {
+    // เปิดหน้าใหม่ (เช่น สลับหน้ากลับมา) ใช้ค่าล่าสุดที่ค้างอยู่ทันที
+    if (this.msg) this.applyMessage(this.msg)
+
+    // นาฬิกาเดินทุกวินาที
+    const updateClock = () => { this.clockText = new Date().toLocaleString('th-TH', { hourCycle: 'h23' }) }
+    updateClock()
+    this.clockTimer = setInterval(updateClock, 1000)
+  },
+  beforeUnmount() {
+    clearInterval(this.clockTimer)
+  },
+
+  // ==================== ฟังก์ชัน ====================
+  methods: {
+    // ---------- รับข้อมูล ----------
+    // รับสถานะทั้งหมดที่ Alarm engine ส่งมา (payload เป็น object รวมทุกค่า)
+    applyMessage(message) {
+      const payload = message && message.payload
+      if (payload && typeof payload === 'object' && !Array.isArray(payload)) {
+        Object.assign(this.plcState, payload)
+      }
+    },
+
+    // ---------- ส่งคำสั่งกลับไป Node-RED ----------
+    acknowledgeAlarm(alarmIndex) { this.send({ topic: 'acknowledge_alarm', payload: alarmIndex }) },  // รับทราบทีละรายการ
+    acknowledgeAllAlarms()       { this.send({ topic: 'acknowledge_all_alarms' }) },                  // รับทราบทั้งหมด
+    clearAlarmHistory()          { this.send({ topic: 'clear_alarm_history' }) },                     // ลบประวัติ (เก็บรายการที่ยังเกิดอยู่)
+
+    // ---------- Export ----------
+    // ดาวน์โหลดประวัติเป็นไฟล์ CSV (เปิดใน Excel ได้ ภาษาไทยไม่เพี้ยน)
+    exportHistoryCsv() {
+      const quoteCell = value => '"' + String(value).replace(/"/g, '""') + '"'
+      const rows = [['time_in', 'time_out', 'duration', 'id', 'description', 'level', 'ack_at']]
+      this.plcState.history.forEach(entry => rows.push([
+        this.formatDateTime(entry.startedAt),
+        entry.endedAt === null ? 'ACTIVE' : this.formatDateTime(entry.endedAt),
+        this.formatDuration(entry),
+        entry.plcTagName,
+        entry.name,
+        entry.level,
+        entry.acknowledgedAt ? this.formatDateTime(entry.acknowledgedAt) : ''
+      ]))
+      const csvText = '\ufeff' + rows.map(row => row.map(quoteCell).join(',')).join('\r\n')
+
+      const fileUrl = URL.createObjectURL(new Blob([csvText], { type: 'text/csv;charset=utf-8' }))
+      const downloadLink = document.createElement('a')
+      downloadLink.href = fileUrl
+      downloadLink.download = 'alarm-history.csv'
+      downloadLink.click()
+      URL.revokeObjectURL(fileUrl)
+    },
+
+    // ---------- ตัวช่วยแสดงผล ----------
+    // วันที่/เวลา เช่น "11/10 10:28:41" (ว่างเป็น —)
+    formatDateTime(milliseconds) {
+      if (!milliseconds) return '—'
+      return new Date(milliseconds).toLocaleString('th-TH', {
+        day: '2-digit', month: '2-digit',
+        hour: '2-digit', minute: '2-digit', second: '2-digit',
+        hourCycle: 'h23'
+      })
+    },
+    // ระยะเวลาที่ Alarm เกิด เช่น "7m 34s" หรือ "1h 5m" (ถ้ายังไม่หาย แสดง —)
+    formatDuration(entry) {
+      if (entry.endedAt === null) return '—'
+      const totalSeconds = Math.max(0, Math.round((entry.endedAt - entry.startedAt) / 1000))
+      if (totalSeconds >= 3600) {
+        return Math.floor(totalSeconds / 3600) + 'h ' + Math.floor((totalSeconds % 3600) / 60) + 'm'
+      }
+      return Math.floor(totalSeconds / 60) + 'm ' + (totalSeconds % 60) + 's'
+    },
+    // สีป้ายตามระดับ: critical = แดง, อื่นๆ = ส้ม
+    levelTagClass(level) {
+      return level === 'critical' ? 'tag-red' : 'tag-amber'
+    }
+  }
+}
+</script>
+
+<style scoped>
+/* ==================== พื้นฐาน / การจัดวางทั้งหน้า ==================== */
+.alarm-page {
+  background: #0b1220;
+  color: #e5e7eb;
+  font-family: 'Segoe UI', system-ui, sans-serif;
+  padding: 20px;
+  border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  box-sizing: border-box;
+}
+
+/* ==================== Header ==================== */
+.page-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding: 0 4px;
+}
+.page-title { font-size: 22px; font-weight: 700; }
+.header-right { display: flex; align-items: center; gap: 14px; }
+.clock-text { font-size: 13px; color: #9ca3af; }
+
+/* ==================== การ์ด ==================== */
+.card {
+  background: #111a2b;
+  border: 1px solid #1f2a3d;
+  border-radius: 10px;
+  padding: 20px;
+  box-sizing: border-box;
+}
+.card.has-active { border-color: rgba(239, 68, 68, .45); }   /* มี Alarm ที่กำลังเกิดอยู่ */
+.card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+.header-left    { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; }
+.header-buttons { display: flex; gap: 8px; }
+.card-label {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: .8px;
+  color: #9ca3af;
+  margin: 0;
+}
+.count-text { font-size: 13px; color: #9ca3af; }
+.count-text b { color: #e5e7eb; }
+.count-text b.red { color: #f87171; }
+.empty-text { font-size: 13px; color: #9ca3af; margin: 0; }
+.empty-text.warning { color: #fbbf24; }
+.scroll-area { overflow-x: auto; }                            /* ตารางกว้างเกินจอ ให้เลื่อนซ้ายขวา */
+
+/* ==================== ข้อความที่ใช้ร่วมกันในตาราง ==================== */
+.alarm-id   { font-family: Consolas, Menlo, monospace; font-size: 14px; font-weight: 600; }
+.alarm-name { font-size: 14px; }
+.time-text  { font-family: Consolas, Menlo, monospace; font-size: 13px; color: #9ca3af; }
+
+/* ==================== ACTIVE: แถว Alarm ที่กำลังเกิด ==================== */
+.active-row {
+  display: grid;
+  grid-template-columns: 80px minmax(200px, 1fr) 100px 150px 150px 150px;
+  align-items: center;
+  gap: 12px;
+  min-width: 820px;
+  min-height: 52px;
+  margin-bottom: 8px;
+  padding: 10px 14px;
+  background: #0b1220;
+  border: 1px solid #1f2a3d;
+  border-left: 4px solid #f59e0b;                             /* สีแถบซ้ายเปลี่ยนตามระดับ */
+  border-radius: 8px;
+  box-sizing: border-box;
+}
+.row-action { display: flex; justify-content: flex-end; }
+
+/* ==================== HISTORY: ตารางประวัติ ==================== */
+.history-head,
+.history-row {
+  display: grid;
+  grid-template-columns: 150px 150px 90px 80px minmax(200px, 1fr) 100px 150px;
+  align-items: center;
+  gap: 12px;
+  min-width: 900px;
+  padding: 10px 14px;
+  box-sizing: border-box;
+}
+.history-head {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: .6px;
+  color: #9ca3af;
+  border-bottom: 1px solid #1f2a3d;
+}
+.history-row {
+  min-height: 44px;
+  font-size: 13px;
+  border-bottom: 1px solid #1f2a3d;
+}
+
+/* ==================== ปุ่ม ==================== */
+.action-button {
+  min-height: 36px;
+  padding: 0 14px;
+  border: 1px solid #2b3a52;
+  border-radius: 6px;
+  background: transparent;
+  color: #e5e7eb;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.action-button.primary { background: #2563eb; border-color: #2563eb; color: #fff; }
+.action-button:disabled { opacity: .45; cursor: not-allowed; }
+.ack-button {                                                 /* ปุ่ม ACK ในแถว */
+  min-width: 72px;
+  min-height: 36px;
+  border: 0;
+  border-radius: 6px;
+  background: #2563eb;
+  color: #fff;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: .5px;
+  cursor: pointer;
+}
+
+/* ==================== แถบ error ==================== */
+.error-bar {
+  background: rgba(239, 68, 68, .12);
+  border: 1px solid rgba(239, 68, 68, .4);
+  color: #fca5a5;
+  border-radius: 8px;
+  padding: 10px 14px;
+  font-size: 13px;
+  word-break: break-word;
+}
+
+/* ==================== บรรทัดค่าดิบ ==================== */
+.raw-text {
+  padding: 0 4px;
+  font-family: Consolas, Menlo, monospace;
+  font-size: 11px;
+  color: #6b7280;
+  word-break: break-all;
+}
+
+/* ==================== ป้ายสี (tag) ใช้ร่วมกัน ==================== */
+.tag {
+  display: inline-block;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid;
+  white-space: nowrap;
+}
+.tag-green { color: #22c55e; border-color: rgba(34, 197, 94, .4);  background: rgba(34, 197, 94, .12); }
+.tag-red   { color: #f87171; border-color: rgba(239, 68, 68, .4);  background: rgba(239, 68, 68, .12); }
+.tag-amber { color: #fbbf24; border-color: rgba(245, 158, 11, .4); background: rgba(245, 158, 11, .12); }
+.tag-gray  { color: #9ca3af; border-color: #2b3a52; }
+</style>

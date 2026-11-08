@@ -1,0 +1,562 @@
+<template>
+  <div class="control-page">
+
+    <!-- ============ HEADER ============ -->
+    <div class="page-header">
+      <span class="page-title">Control</span>
+      <div class="header-right">
+        <span class="clock-text">{{ clockText }}</span>
+        <span class="tag" :class="statusBadge.cssClass">{{ statusBadge.text }}</span>
+      </div>
+    </div>
+
+    <div class="page-layout">
+
+      <!-- ============ คอลัมน์ซ้าย: ปุ่มควบคุม ============ -->
+      <div class="left-column">
+
+        <!-- MODE: สลับ Manual / Auto -->
+        <div class="card">
+          <p class="card-label">MODE</p>
+          <div class="mode-switch">
+            <button type="button" :class="{ active: plcState.manual }" :aria-pressed="plcState.manual"
+              @click="setManualMode(true)">MANUAL</button>
+            <button type="button" :class="{ active: !plcState.manual }" :aria-pressed="!plcState.manual"
+              @click="setManualMode(false)">AUTO</button>
+          </div>
+        </div>
+
+        <!-- COMMAND: กดค้างส่ง true ปล่อยส่ง false (วนจากรายการ COMMAND_BUTTONS) -->
+        <div class="card">
+          <p class="card-label">COMMAND</p>
+          <div class="command-row">
+            <button v-for="button in COMMAND_BUTTONS" :key="button.name" type="button"
+              class="command-button" :class="[button.name, { 'is-held': heldButtons[button.name] }]"
+              @pointerdown.prevent="pressCommand(button.name, $event)"
+              @pointerup="releaseCommand(button.name)"
+              @pointercancel="releaseCommand(button.name)"
+              @lostpointercapture="releaseCommand(button.name)"
+              @keydown.space.prevent="pressCommand(button.name)"
+              @keydown.enter.prevent="pressCommand(button.name)"
+              @keyup.space="releaseCommand(button.name)"
+              @keyup.enter="releaseCommand(button.name)"
+              @contextmenu.prevent>{{ button.label }}</button>
+          </div>
+          <p class="address-text">{{ commandAddressText }}</p>
+        </div>
+
+        <!-- SETPOINT: ป้อนตัวเลขแล้วกด SEND -->
+        <div class="card">
+          <p class="card-label">SETPOINT · ป้อนค่าส่งไป PLC</p>
+          <label for="setpoint-input" class="field-label">
+            ค่าที่ต้องการส่ง ({{ SETPOINT_CONFIG.min }}–{{ SETPOINT_CONFIG.max }} {{ SETPOINT_CONFIG.unit }})
+          </label>
+          <div class="setpoint-row">
+            <div class="setpoint-box" :class="{ invalid: !isSetpointValid }">
+              <input id="setpoint-input" type="number" inputmode="numeric" step="1"
+                :min="SETPOINT_CONFIG.min" :max="SETPOINT_CONFIG.max"
+                v-model="setpointInput" @keyup.enter="sendSetpoint" />
+              <span class="unit-text">{{ SETPOINT_CONFIG.unit }}</span>
+            </div>
+            <button type="button" class="send-button" :disabled="!isSetpointValid" @click="sendSetpoint">SEND</button>
+          </div>
+          <p class="error-text" v-if="!isSetpointValid">
+            ใส่เลขจำนวนเต็มระหว่าง {{ SETPOINT_CONFIG.min }} ถึง {{ SETPOINT_CONFIG.max }}
+          </p>
+          <p class="address-text">
+            ค่าปัจจุบันใน PLC: {{ formatNumber(plcState.setpoint) }} · SEND → {{ SETPOINT_CONFIG.address }} (INT)
+          </p>
+        </div>
+
+        <!-- STATUS: หลอดไฟสถานะ -->
+        <div class="card">
+          <p class="card-label">STATUS</p>
+          <div class="lamp-grid">
+            <div class="lamp-item" v-for="lamp in statusLamps" :key="lamp.label">
+              <span class="lamp-dot" :class="lamp.isOn ? lamp.color : 'off'"></span>{{ lamp.label }}
+            </div>
+          </div>
+        </div>
+
+      </div>
+
+      <!-- ============ คอลัมน์ขวา: Monitoring และ Command log ============ -->
+      <div class="right-column">
+        <div class="card monitoring-card">
+          <p class="card-label">MONITORING</p>
+          <div class="monitoring-grid">
+            <div class="monitoring-item">
+              <span class="monitoring-label">GOOD WP</span>
+              <strong class="monitoring-value">{{ formatNumber(plcState.goodWp) }}</strong>
+              <span class="address-text">DB1.DBW4 (INT)</span>
+            </div>
+            <div class="monitoring-item">
+              <span class="monitoring-label">NG WP</span>
+              <strong class="monitoring-value">{{ formatNumber(plcState.ngWp) }}</strong>
+              <span class="address-text">DB1.DBW6 (INT)</span>
+            </div>
+            <div class="monitoring-item">
+              <span class="monitoring-label">WP SET</span>
+              <strong class="monitoring-value">{{ formatNumber(plcState.setpoint) }}</strong>
+              <span class="address-text">DB1.DBW2 (INT)</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="card log-card">
+          <div class="log-header">
+            <p class="card-label card-label-flat">COMMAND LOG</p>
+            <button type="button" class="clear-button" @click="clearCommandLog">CLEAR</button>
+          </div>
+          <p class="empty-text" v-if="!commandLog.length">ยังไม่มีเหตุการณ์ใน Command Log</p>
+          <div class="log-row" v-for="entry in commandLog" :key="entry.id">
+            <span class="time-text">{{ formatLogTime(entry) }}</span>
+            <span>{{ entry.message }} <span class="address-text address-inline">{{ entry.address }}</span></span>
+            <span class="tag" :class="'tag-' + entry.color">{{ entry.label }}</span>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</template>
+
+<script>
+/*
+  CONTROL PANEL  ·  Dashboard 2.0 ui-template
+  - ค่าที่แก้บ่อยอยู่ที่ CONFIG ใน data() ด้านล่าง (ช่วงค่า, หน่วย, address ที่แสดง)
+  - ส่วนหน้าตา = บล็อก template | การทำงาน = บล็อก script นี้ | สี/การจัดวาง = บล็อก style
+
+  ตัวแปรหลัก:
+    plcState       สถานะที่อ่านมาจาก PLC (manual, running, fault, setpoint, plcConnected)
+    commandLog     รายการเหตุการณ์ใน Command Log (RUN / STOP / FAULT และการส่ง Setpoint)
+    setpointInput  ตัวเลขที่ผู้ใช้พิมพ์ในช่อง Setpoint
+    heldButtons    บอกว่าปุ่มคำสั่งไหนกำลังถูกกดค้างอยู่
+*/
+export default {
+  data() {
+    // ==================== CONFIG (แก้ตรงนี้) ====================
+    // address ในรายการนี้ใช้ "แสดงบนหน้าจอ" เท่านั้น
+    // ตัวที่ส่งค่าไป PLC จริงตั้งที่ s7 endpoint ใน Node-RED
+    const SETPOINT_CONFIG = { min: 0, max: 100, unit: '%', address: 'DB1.DBW2' }
+
+    const COMMAND_BUTTONS = [
+      { name: 'start', label: 'START', address: 'DB1.DBX0.0' },
+      { name: 'stop',  label: 'STOP',  address: 'DB1.DBX0.1' },
+      { name: 'reset', label: 'RESET', address: 'DB1.DBX0.5' }
+    ]
+    // =============================================================
+
+    return {
+      SETPOINT_CONFIG,
+      COMMAND_BUTTONS,
+
+      // ---- นาฬิกา ----
+      clockText: '',
+      clockTimer: null,
+
+      // ---- ปุ่มและช่องกรอก ----
+      setpointInput: 0,                                                       // ค่าในช่อง Setpoint
+      heldButtons: Object.fromEntries(COMMAND_BUTTONS.map(b => [b.name, false])), // ปุ่มไหนถูกกดค้างอยู่
+
+      // ---- ข้อมูลจาก PLC / Node-RED ----
+      commandLog: [],
+      plcState: {
+        manual: false,
+        running: false,
+        fault: false,
+        setpoint: null,
+        goodWp: null,
+        ngWp: null,
+        plcConnected: false
+      }
+    }
+  },
+
+  // ==================== ค่าที่คำนวณ ====================
+  computed: {
+    // Setpoint ต้องเป็นจำนวนเต็มในช่วงที่กำหนด
+    isSetpointValid() {
+      if (this.setpointInput === '' || this.setpointInput === null) return false
+      const value = Number(this.setpointInput)
+      return Number.isInteger(value) && value >= this.SETPOINT_CONFIG.min && value <= this.SETPOINT_CONFIG.max
+    },
+
+    // ป้ายสถานะมุมขวาบน เช่น "MANUAL · RUNNING"
+    statusBadge() {
+      const modeName = this.plcState.manual ? 'MANUAL' : 'AUTO'
+      if (this.plcState.fault) return { cssClass: 'tag-amber', text: modeName + ' · FAULT' }
+      return this.plcState.running
+        ? { cssClass: 'tag-green', text: modeName + ' · RUNNING' }
+        : { cssClass: 'tag-red', text: modeName + ' · STOPPED' }
+    },
+
+    // หลอดไฟ: isOn = เงื่อนไขที่ทำให้ติด, color = สีตอนติด (green / red / amber)
+    statusLamps() {
+      const state = this.plcState
+      return [
+        { label: 'RUN',      isOn: state.running,      color: 'green' },
+        { label: 'STOP',     isOn: !state.running,     color: 'red' },
+        { label: 'MANUAL',   isOn: state.manual,       color: 'amber' },
+        { label: 'AUTO',     isOn: !state.manual,      color: 'amber' },
+        { label: 'FAULT',    isOn: state.fault,        color: 'red' },
+        { label: 'PLC LINK', isOn: state.plcConnected, color: 'green' }
+      ]
+    },
+
+    // ข้อความ address ใต้ปุ่มคำสั่ง
+    commandAddressText() {
+      return this.COMMAND_BUTTONS.map(b => b.label + ' → ' + b.address).join(' · ')
+    }
+  },
+
+  // ==================== รับข้อมูลเข้า ====================
+  watch: {
+    msg(message) { this.applyMessage(message) }
+  },
+
+  // ==================== วงจรชีวิตของหน้า ====================
+  mounted() {
+    // เปิดหน้าใหม่ (เช่น สลับหน้ากลับมา) ใช้ค่าล่าสุดที่ค้างอยู่ทันที
+    if (this.msg) this.applyMessage(this.msg)
+
+    // นาฬิกาเดินทุกวินาที
+    const updateClock = () => { this.clockText = new Date().toLocaleString('th-TH', { hourCycle: 'h23' }) }
+    updateClock()
+    this.clockTimer = setInterval(updateClock, 1000)
+
+    // ถ้าหน้าหลุดโฟกัสขณะกดค้าง ให้ปล่อยปุ่มเอง (กันค่า true ค้างใน PLC)
+    window.addEventListener('blur', this.releaseAllCommands)
+    document.addEventListener('visibilitychange', this.releaseAllCommands)
+  },
+  beforeUnmount() {
+    clearInterval(this.clockTimer)
+    window.removeEventListener('blur', this.releaseAllCommands)
+    document.removeEventListener('visibilitychange', this.releaseAllCommands)
+    this.releaseAllCommands()
+  },
+
+  // ==================== ฟังก์ชัน ====================
+  methods: {
+    // ---------- รับข้อมูล ----------
+    // รับสถานะและ log ที่ Node-RED ส่งมา (payload เป็น object รวมทุกค่า)
+    applyMessage(message) {
+      if (!message) return
+      const payload = message.payload
+      if (payload && typeof payload === 'object' && !Array.isArray(payload)) {
+        const { commandLog, ...plcValues } = payload
+        if (Array.isArray(commandLog)) this.commandLog = commandLog
+        Object.assign(this.plcState, plcValues)
+      } else if (typeof message.topic === 'string' && message.topic in this.plcState) {
+        this.plcState[message.topic] = payload          // กรณีส่งมาทีละค่า
+      }
+    },
+
+    // ---------- ส่งคำสั่งไป PLC ----------
+    // กดปุ่ม: ส่ง true (ทำงานครั้งเดียวต่อการกดหนึ่งครั้ง)
+    pressCommand(commandName, event) {
+      if (this.heldButtons[commandName]) return
+      if (event && event.currentTarget && event.pointerId !== undefined) {
+        // จับ pointer ไว้ เพื่อให้ได้ event "ปล่อย" แม้ลากเมาส์/นิ้วออกนอกปุ่ม
+        try { event.currentTarget.setPointerCapture(event.pointerId) } catch (error) {}
+      }
+      this.heldButtons[commandName] = true
+      this.send({ topic: commandName, payload: true })
+    },
+    // ปล่อยปุ่ม: ส่ง false
+    releaseCommand(commandName) {
+      if (!this.heldButtons[commandName]) return
+      this.heldButtons[commandName] = false
+      this.send({ topic: commandName, payload: false })
+    },
+    // ปล่อยทุกปุ่มที่ค้างอยู่
+    releaseAllCommands() {
+      this.COMMAND_BUTTONS.forEach(button => this.releaseCommand(button.name))
+    },
+    // สลับโหมด Manual (true) / Auto (false)
+    setManualMode(isManual) {
+      this.plcState.manual = isManual
+      this.send({ topic: 'set_manual_mode', payload: isManual })
+    },
+    // ส่งค่า Setpoint (เฉพาะเมื่อค่าถูกต้อง)
+    sendSetpoint() {
+      if (!this.isSetpointValid) return
+      const setpointValue = Number(this.setpointInput)
+      this.send({ topic: 'setpoint', payload: setpointValue })
+
+      // บันทึกลง Command Log (Node-RED เป็นคนเก็บและส่งรายการกลับมาแสดง)
+      const now = Date.now()
+      this.send({ topic: 'add_command_log', payload: {
+        id: now + '-setpoint',
+        timestamp: now,
+        label: 'SETPOINT',
+        color: 'green',
+        message: 'Setpoint sent ' + setpointValue,
+        address: this.SETPOINT_CONFIG.address
+        } 
+      })
+
+      this.setpointInput = 0
+    },
+
+    // ---------- Command log ----------
+    clearCommandLog() {
+      this.send({ topic: 'clear_command_log' })
+    },
+    // เวลาของแถว log (Node-RED บันทึกเป็น timestamp)
+    formatLogTime(entry) {
+      return new Date(entry.timestamp).toLocaleTimeString('th-TH', { hourCycle: 'h23' })
+    },
+
+    // ---------- ตัวช่วยแสดงผล ----------
+    formatNumber(value) {
+      return typeof value === 'number' ? String(value) : '--'
+    }
+  }
+}
+</script>
+
+<style scoped>
+/* ==================== พื้นฐาน / การจัดวางทั้งหน้า ==================== */
+.control-page {
+  background: #0b1220;
+  color: #e5e7eb;
+  font-family: 'Segoe UI', system-ui, sans-serif;
+  padding: 20px;
+  border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  box-sizing: border-box;
+}
+.page-layout {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: stretch;
+  gap: 20px;
+}
+.left-column {
+  flex: 1 1 360px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+.right-column {
+  flex: 1.4 1 420px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+/* ==================== Header ==================== */
+.page-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding: 0 4px;
+}
+.page-title { font-size: 22px; font-weight: 700; }
+.header-right { display: flex; align-items: center; gap: 14px; }
+.clock-text { font-size: 13px; color: #9ca3af; }
+
+/* ==================== การ์ดและข้อความทั่วไป ==================== */
+.card {
+  background: #111a2b;
+  border: 1px solid #1f2a3d;
+  border-radius: 10px;
+  padding: 20px;
+  box-sizing: border-box;
+}
+.card-label {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: .8px;
+  color: #9ca3af;
+  margin: 0 0 14px;
+}
+.card-label-flat { margin: 0; }
+.field-label { display: block; font-size: 13px; color: #9ca3af; margin-bottom: 8px; }
+.address-text {
+  font-family: Consolas, Menlo, monospace;
+  font-size: 12px;
+  color: #9ca3af;
+  margin: 12px 0 0;
+}
+.address-inline { margin: 0; }
+.empty-text { font-size: 13px; color: #9ca3af; }
+.error-text { font-size: 12px; color: #f87171; margin: 8px 0 0; }
+
+/* ==================== MODE (สวิตช์ Manual / Auto) ==================== */
+.mode-switch {
+  display: flex;
+  gap: 4px;
+  padding: 4px;
+  background: #0b1220;
+  border: 1px solid #1f2a3d;
+  border-radius: 8px;
+}
+.mode-switch button {
+  flex: 1;
+  min-height: 48px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: #9ca3af;
+  font-size: 15px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.mode-switch button.active { background: #f59e0b; color: #111827; }
+
+/* ==================== COMMAND (START / STOP / RESET) ==================== */
+.command-row { display: flex; gap: 14px; }
+.command-button {
+  flex: 1;
+  min-height: 84px;
+  border: 0;
+  border-radius: 10px;
+  color: #fff;
+  font-size: 20px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  cursor: pointer;
+  user-select: none;
+  -webkit-user-select: none;
+  touch-action: none;
+  transition: transform .08s, filter .08s;
+}
+.command-button.start { background: #16a34a; }
+.command-button.stop  { background: #dc2626; }
+.command-button.reset { background: #b45309; }
+.command-button.is-held {                     /* ขณะกดค้าง */
+  transform: scale(.97);
+  filter: brightness(1.25);
+  box-shadow: 0 0 0 3px rgba(255, 255, 255, .35);
+}
+
+/* ==================== SETPOINT ==================== */
+.setpoint-row { display: flex; align-items: stretch; gap: 12px; }
+.setpoint-box {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  min-height: 52px;
+  padding: 0 14px;
+  background: #0b1220;
+  border: 1px solid #2b3a52;
+  border-radius: 8px;
+}
+.setpoint-box.invalid { border-color: #ef4444; }
+.setpoint-box input {
+  flex: 1;
+  min-width: 0;
+  background: transparent;
+  border: 0;
+  outline: 0;
+  color: #e5e7eb;
+  font-size: 22px;
+  font-weight: 600;
+  font-family: Consolas, Menlo, monospace;
+}
+.unit-text { font-size: 14px; color: #9ca3af; }
+.send-button {
+  min-width: 110px;
+  min-height: 52px;
+  border: 0;
+  border-radius: 8px;
+  background: #2563eb;
+  color: #fff;
+  font-size: 16px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  cursor: pointer;
+}
+.send-button:disabled { background: #374151; color: #9ca3af; cursor: not-allowed; }
+
+/* ==================== STATUS (หลอดไฟ) ==================== */
+.lamp-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px 24px; }
+.lamp-item { display: flex; align-items: center; gap: 10px; font-size: 14px; }
+.lamp-dot {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  flex: none;
+  background: #374151;                          /* ดับ */
+  transition: all .2s;
+}
+.lamp-dot.green { background: #22c55e; box-shadow: 0 0 12px #22c55e; }
+.lamp-dot.red   { background: #ef4444; box-shadow: 0 0 12px #ef4444; }
+.lamp-dot.amber { background: #f59e0b; box-shadow: 0 0 12px #f59e0b; }
+
+/* ==================== MONITORING ==================== */
+.monitoring-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+.monitoring-item {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 14px;
+  background: #0b1220;
+  border: 1px solid #1f2a3d;
+  border-radius: 8px;
+}
+.monitoring-label { font-size: 12px; font-weight: 600; color: #9ca3af; }
+.monitoring-value { font-size: 28px; line-height: 1.2; color: #e5e7eb; font-family: Consolas, Menlo, monospace; }
+
+/* ==================== COMMAND LOG ==================== */
+.log-card {
+  flex: 1 1 auto;
+  min-width: 0;
+  max-height: 760px;
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+}
+.log-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 6px;
+}
+.clear-button {
+  min-height: 36px;
+  padding: 0 14px;
+  border: 1px solid #1f2a3d;
+  border-radius: 6px;
+  background: transparent;
+  color: #9ca3af;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.log-row {
+  display: grid;
+  grid-template-columns: 80px 1fr auto;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 0;
+  border-bottom: 1px solid #1f2a3d;
+  font-size: 13px;
+}
+.time-text { font-family: Consolas, Menlo, monospace; color: #9ca3af; }
+
+/* ==================== ป้ายสี (tag) ใช้ร่วมกัน ==================== */
+.tag {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 10px;
+  border-radius: 999px;
+  border: 1px solid;
+}
+.tag-green { color: #22c55e; border-color: rgba(34, 197, 94, .4);  background: rgba(34, 197, 94, .12); }
+.tag-red   { color: #f87171; border-color: rgba(239, 68, 68, .4);  background: rgba(239, 68, 68, .12); }
+.tag-amber { color: #fbbf24; border-color: rgba(245, 158, 11, .4); background: rgba(245, 158, 11, .12); }
+
+@media (max-width: 600px) {
+  .monitoring-grid { grid-template-columns: 1fr; }
+}
+</style>

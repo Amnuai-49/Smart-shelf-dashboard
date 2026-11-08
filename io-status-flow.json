@@ -1,0 +1,434 @@
+[
+ {
+  "id": "io_tab",
+  "type": "tab",
+  "label": "IO Status",
+  "disabled": false,
+  "info": "Input อ่านจาก IB0/IB1 | Output สั่ง/อ่านจาก Q0.0..Q1.1 โดยตรง | โหมด/สถานะอ่านจาก DB1"
+ },
+ {
+  "id": "io2_ep",
+  "type": "s7 endpoint",
+  "transport": "iso-on-tcp",
+  "address": "192.168.0.1",
+  "port": "102",
+  "rack": "0",
+  "slot": "1",
+  "localtsaphi": "01",
+  "localtsaplo": "00",
+  "remotetsaphi": "01",
+  "remotetsaplo": "00",
+  "connmode": "rack-slot",
+  "adapter": "",
+  "busaddr": "2",
+  "cycletime": "500",
+  "timeout": "2000",
+  "name": "PLC IO",
+  "vartable": [
+   {
+    "addr": "IB0",
+    "name": "input_byte0"
+   },
+   {
+    "addr": "IB1",
+    "name": "input_byte1"
+   },
+   {
+    "addr": "DB1,X0.2",
+    "name": "manual"
+   },
+   {
+    "addr": "DB1,X0.3",
+    "name": "running"
+   },
+   {
+    "addr": "DB1,X0.4",
+    "name": "fault"
+   },
+   {
+    "addr": "Q0.0",
+    "name": "output_q0_0"
+   },
+   {
+    "addr": "Q0.1",
+    "name": "output_q0_1"
+   },
+   {
+    "addr": "Q0.2",
+    "name": "output_q0_2"
+   },
+   {
+    "addr": "Q0.3",
+    "name": "output_q0_3"
+   },
+   {
+    "addr": "Q0.4",
+    "name": "output_q0_4"
+   },
+   {
+    "addr": "Q0.5",
+    "name": "output_q0_5"
+   },
+   {
+    "addr": "Q0.6",
+    "name": "output_q0_6"
+   },
+   {
+    "addr": "Q0.7",
+    "name": "output_q0_7"
+   },
+   {
+    "addr": "Q1.0",
+    "name": "output_q1_0"
+   },
+   {
+    "addr": "Q1.1",
+    "name": "output_q1_1"
+   }
+  ]
+ },
+ {
+  "id": "io_in",
+  "type": "s7 in",
+  "z": "io_tab",
+  "endpoint": "io2_ep",
+  "mode": "all",
+  "variable": "",
+  "diff": false,
+  "name": "IO bytes",
+  "x": 130,
+  "y": 100,
+  "wires": [
+   [
+    "io_dec",
+    "io_dbg"
+   ]
+  ]
+ },
+ {
+  "id": "io_dec",
+  "type": "function",
+  "z": "io_tab",
+  "name": "Decode bits",
+  "func": "// แปลงค่า byte จาก PLC เป็นสถานะรายจุด (true/false)\n// เก็บค่าดิบล่าสุดของทุกตัวแปรไว้ใน flow context ชื่อ 'plc_raw_values'\n// กันกรณี s7 in ส่งมาเฉพาะตัวที่เปลี่ยนค่า (ตัวที่ไม่มาจะไม่ถูกถือว่าเป็น false)\nconst rawValues = flow.get('plc_raw_values') || {};\nconst incoming = msg.payload;\nif (incoming && typeof incoming === 'object' && !Array.isArray(incoming)) {\n  Object.assign(rawValues, incoming);          // โหมด All variables\n} else if (typeof msg.topic === 'string' && msg.topic) {\n  rawValues[msg.topic] = incoming;             // โหมดแยกทีละตัวแปร\n}\nflow.set('plc_raw_values', rawValues);\n\n// อ่านบิตที่ bitNumber จากรายการ byte (bitNumber 0-7 = byte แรก, 8-15 = byte ที่สอง)\nconst readBit = (bytes, bitNumber) => (((bytes[bitNumber >> 3] || 0) >> (bitNumber & 7)) & 1) === 1;\n\n// Input: I0.0 .. I1.5 (14 จุด) อ่านจาก input_byte0 / input_byte1\nconst inputBytes = [rawValues.input_byte0, rawValues.input_byte1];\nconst inputBits = [];\nfor (let bitNumber = 0; bitNumber < 14; bitNumber++) inputBits.push(readBit(inputBytes, bitNumber));\n\n// Output: Q0.0 .. Q1.1 (10 จุด) อ่านทีละบิต เช่น output_q0_0\nconst outputBits = [];\nfor (let bitNumber = 0; bitNumber < 10; bitNumber++) {\n  outputBits.push(!!rawValues['output_q' + (bitNumber >> 3) + '_' + (bitNumber & 7)]);\n}\n\nreturn { payload: {\n  inputBits, outputBits,\n  manual: !!rawValues.manual, running: !!rawValues.running, fault: !!rawValues.fault,\n  rawValues\n} };",
+  "outputs": 1,
+  "x": 330,
+  "y": 100,
+  "wires": [
+   [
+    "io_merge"
+   ]
+  ]
+ },
+ {
+  "id": "io_tpl",
+  "type": "ui-template",
+  "z": "io_tab",
+  "group": "",
+  "page": "",
+  "ui": "",
+  "name": "IO Status",
+  "order": 0,
+  "width": "12",
+  "height": "0",
+  "head": "",
+  "format": "<template>\n  <div class=\"io-page\">\n\n    <!-- ============ HEADER ============ -->\n    <div class=\"page-header\">\n      <span class=\"page-title\">IO Status</span>\n      <div class=\"header-right\">\n        <span class=\"clock-text\">{{ clockText }}</span>\n        <span class=\"tag\" :class=\"statusBadge.cssClass\">{{ statusBadge.text }}</span>\n      </div>\n    </div>\n\n    <!-- แถบแดง: แสดง error ที่ได้จาก PLC (ถ้ามี) -->\n    <div class=\"error-bar\" v-if=\"plcState.errorText\">PLC ERROR · {{ plcState.errorText }}</div>\n\n    <div class=\"columns\">\n\n      <!-- ============ INPUTS (ซ้าย): แสดงสถานะอย่างเดียว ============ -->\n      <div class=\"card\">\n        <div class=\"card-header\">\n          <p class=\"card-label\">INPUTS · I0.0 – I1.5</p>\n          <span class=\"count-text\"><b>{{ inputsOnCount }}</b> / {{ inputPoints.length }} ON</span>\n        </div>\n        <div class=\"point-grid\" :style=\"{ '--rows': Math.ceil(inputPoints.length / 2) }\">\n          <div class=\"point-tile\" v-for=\"point in inputPoints\" :key=\"point.address\">\n            <span class=\"lamp-dot\" :class=\"point.isOn ? 'green' : 'off'\"></span>\n            <span class=\"point-address\">{{ point.address }}</span>\n            <span class=\"point-name\">{{ point.name }}</span>\n            <span class=\"state-pill\" :class=\"point.isOn ? 'on' : 'off'\">{{ point.isOn ? 'ON' : 'OFF' }}</span>\n          </div>\n        </div>\n      </div>\n\n      <!-- ============ OUTPUTS (ขวา): กดเพื่อสั่ง ON/OFF ได้ในโหมด MANUAL ============ -->\n      <div class=\"card\">\n        <div class=\"card-header\">\n          <p class=\"card-label\">OUTPUTS · Q0.0 – Q1.1</p>\n          <span class=\"count-text\"><b>{{ outputsOnCount }}</b> / {{ outputPoints.length }} ON</span>\n        </div>\n        <p class=\"hint-text\" :class=\"{ warning: outputHint.isWarning }\">{{ outputHint.text }}</p>\n        <div class=\"point-grid\" :style=\"{ '--rows': Math.ceil(outputPoints.length / 2) }\">\n          <button type=\"button\" class=\"point-tile point-button\"\n            v-for=\"(point, outputIndex) in outputPoints\" :key=\"point.address\"\n            :disabled=\"!canCommandOutputs\" :aria-pressed=\"point.isOn\" @click=\"toggleOutput(outputIndex)\">\n            <span class=\"lamp-dot\" :class=\"point.isOn ? 'amber' : 'off'\"></span>\n            <span class=\"point-address\">{{ point.address }}</span>\n            <span class=\"point-name\">{{ point.name }}</span>\n            <span class=\"state-pill\" :class=\"point.isOn ? 'on' : 'off'\">{{ point.isOn ? 'ON' : 'OFF' }}</span>\n          </button>\n        </div>\n      </div>\n\n    </div>\n\n    <!-- บรรทัดตรวจสอบ: ค่าดิบที่ Node-RED อ่านได้จาก PLC (ลบบรรทัดนี้ได้เมื่อใช้งานปกติแล้ว) -->\n    <div class=\"raw-text\">RAW · {{ rawValuesText }}</div>\n  </div>\n</template>\n\n<script>\n/*\n  IO STATUS  ·  Dashboard 2.0 ui-template\n  - ตั้งชื่อแต่ละจุดที่ CONFIG ใน data() ด้านล่าง\n  - Input แสดงสถานะ | Output กดสั่งได้เมื่อ PLC อยู่โหมด MANUAL\n\n  ตัวแปรหลัก:\n    plcState.inputBits / outputBits   อาร์เรย์ true/false ของแต่ละจุด (ตัวแรกคือ I0.0 / Q0.0)\n    plcState.hasPlcData               true เมื่อเคยได้ข้อมูลจริงจาก PLC แล้ว\n    plcState.rawValues                ค่าดิบที่อ่านได้ (ใช้ตรวจสอบปัญหา)\n    inputPoints / outputPoints        รายการจุด (address + ชื่อ + ติดหรือดับ) สำหรับแสดงผล\n*/\nexport default {\n  data() {\n    return {\n      // ==================== CONFIG (แก้ตรงนี้) ====================\n      // ชื่อเรียงตามลำดับ I0.0, I0.1, ... I0.7, I1.0, ... (ตัวแรกคือ I0.0)\n      INPUT_NAMES: [\n        'DI 00', 'DI 01', 'DI 02', 'DI 03', 'DI 04', 'DI 05', 'DI 06',\n        'DI 07', 'DI 08', 'DI 09', 'DI 10', 'DI 11', 'DI 12', 'DI 13'\n      ],\n      // ชื่อเรียงตามลำดับ Q0.0, Q0.1, ... Q0.7, Q1.0, ...\n      OUTPUT_NAMES: [\n        'DO 00', 'DO 01', 'DO 02', 'DO 03', 'DO 04',\n        'DO 05', 'DO 06', 'DO 07', 'DO 08', 'DO 09'\n      ],\n      // =============================================================\n\n      // ---- นาฬิกา ----\n      clockText: '',\n      clockTimer: null,\n\n      // ---- ข้อมูลจาก PLC / Node-RED ----\n      plcState: {\n        inputBits: [], outputBits: [],\n        manual: false, running: false, fault: false,\n        hasPlcData: false, errorText: '', rawValues: {}\n      }\n    }\n  },\n\n  // ==================== ค่าที่คำนวณ ====================\n  computed: {\n    // ---------- รายการจุด Input / Output (ชื่อ + address + สถานะ) ----------\n    inputPoints() {\n      return this.INPUT_NAMES.map((name, bitNumber) => ({\n        address: 'I' + (bitNumber >> 3) + '.' + (bitNumber & 7),\n        name,\n        isOn: !!this.plcState.inputBits[bitNumber]\n      }))\n    },\n    outputPoints() {\n      return this.OUTPUT_NAMES.map((name, bitNumber) => ({\n        address: 'Q' + (bitNumber >> 3) + '.' + (bitNumber & 7),\n        name,\n        isOn: !!this.plcState.outputBits[bitNumber]\n      }))\n    },\n    inputsOnCount()  { return this.inputPoints.filter(point => point.isOn).length },\n    outputsOnCount() { return this.outputPoints.filter(point => point.isOn).length },\n\n    // ---------- ป้ายสถานะมุมขวาบน ----------\n    // ถ้ายังไม่ได้ข้อมูลจาก PLC จะไม่แสดง AUTO หลอกๆ\n    statusBadge() {\n      if (!this.plcState.hasPlcData) return { cssClass: 'tag-gray', text: 'NO DATA FROM PLC' }\n      const modeName = this.plcState.manual ? 'MANUAL' : 'AUTO'\n      if (this.plcState.fault) return { cssClass: 'tag-amber', text: modeName + ' · FAULT' }\n      return this.plcState.running\n        ? { cssClass: 'tag-green', text: modeName + ' · RUNNING' }\n        : { cssClass: 'tag-red', text: modeName + ' · STOPPED' }\n    },\n\n    // ---------- สิทธิ์สั่ง Output ----------\n    // สั่งได้ต่อเมื่อได้ข้อมูลจาก PLC แล้ว และอยู่โหมด MANUAL\n    canCommandOutputs() {\n      return this.plcState.hasPlcData && this.plcState.manual\n    },\n\n    // ข้อความใต้หัวการ์ด Output บอกสถานะ/เหตุผลที่กดไม่ได้\n    outputHint() {\n      if (!this.plcState.hasPlcData) {\n        return { isWarning: true, text: 'ยังไม่ได้รับข้อมูลจาก PLC · ตรวจ IP, PUT/GET และข้อความ error ด้านบน' }\n      }\n      if (!this.canCommandOutputs) {\n        return { isWarning: true, text: 'AUTO · สั่ง Output ไม่ได้ สลับเป็น MANUAL ที่หน้า Control ก่อน' }\n      }\n      return { isWarning: false, text: 'MANUAL · กดที่จุดเพื่อสั่ง ON / OFF' }\n    },\n\n    // ---------- บรรทัดค่าดิบ ----------\n    rawValuesText() {\n      const rawValues = this.plcState.rawValues || {}\n      return Object.keys(rawValues).length\n        ? JSON.stringify(rawValues)\n        : 'ไม่มีข้อมูลดิบ (s7 in ยังไม่ส่งค่ามา)'\n    }\n  },\n\n  // ==================== รับข้อมูลเข้า ====================\n  watch: {\n    msg(message) { this.applyMessage(message) }\n  },\n\n  // ==================== วงจรชีวิตของหน้า ====================\n  mounted() {\n    // เปิดหน้าใหม่ (เช่น สลับหน้ากลับมา) ใช้ค่าล่าสุดที่ค้างอยู่ทันที\n    if (this.msg) this.applyMessage(this.msg)\n\n    // นาฬิกาเดินทุกวินาที\n    const updateClock = () => { this.clockText = new Date().toLocaleString('th-TH', { hourCycle: 'h23' }) }\n    updateClock()\n    this.clockTimer = setInterval(updateClock, 1000)\n  },\n  beforeUnmount() {\n    clearInterval(this.clockTimer)\n  },\n\n  // ==================== ฟังก์ชัน ====================\n  methods: {\n    // รับสถานะที่ Node-RED ส่งมา (payload เป็น object รวมทุกค่า) แล้วเก็บเข้า plcState\n    applyMessage(message) {\n      const payload = message && message.payload\n      if (!payload || typeof payload !== 'object') return\n\n      if (Array.isArray(payload.inputBits)) {\n        this.plcState.inputBits = payload.inputBits\n        this.plcState.hasPlcData = true                 // ได้ข้อมูลจริงแล้ว\n      }\n      if (Array.isArray(payload.outputBits))        this.plcState.outputBits = payload.outputBits\n      if (typeof payload.manual === 'boolean')      this.plcState.manual = payload.manual\n      if (typeof payload.running === 'boolean')     this.plcState.running = payload.running\n      if (typeof payload.fault === 'boolean')       this.plcState.fault = payload.fault\n      if (typeof payload.errorText === 'string')    this.plcState.errorText = payload.errorText\n      if (payload.rawValues && typeof payload.rawValues === 'object') this.plcState.rawValues = payload.rawValues\n    },\n\n    // กดจุด Output: ส่งค่าตรงข้ามกับสถานะปัจจุบัน (topic เช่น output_q0_0, output_q0_1, ... output_q1_1)\n    // flow ฝั่งเซิร์ฟเวอร์ตรวจโหมด MANUAL ซ้ำอีกชั้นก่อนเขียนลง PLC\n    toggleOutput(outputIndex) {\n      if (!this.canCommandOutputs) return\n      const topic = 'output_q' + (outputIndex >> 3) + '_' + (outputIndex & 7)\n      this.send({ topic, payload: !this.outputPoints[outputIndex].isOn })\n    }\n  }\n}\n</script>\n\n<style scoped>\n/* ==================== พื้นฐาน / การจัดวางทั้งหน้า ==================== */\n.io-page {\n  background: #0b1220;\n  color: #e5e7eb;\n  font-family: 'Segoe UI', system-ui, sans-serif;\n  padding: 20px;\n  border-radius: 8px;\n  display: flex;\n  flex-direction: column;\n  gap: 20px;\n  box-sizing: border-box;\n}\n.columns {                                        /* Input ซ้าย / Output ขวา */\n  display: flex;\n  flex-wrap: wrap;\n  align-items: flex-start;\n  gap: 20px;\n}\n\n/* ==================== Header ==================== */\n.page-header {\n  display: flex;\n  align-items: center;\n  justify-content: space-between;\n  flex-wrap: wrap;\n  gap: 12px;\n  padding: 0 4px;\n}\n.page-title { font-size: 22px; font-weight: 700; }\n.header-right { display: flex; align-items: center; gap: 14px; }\n.clock-text { font-size: 13px; color: #9ca3af; }\n\n/* ==================== การ์ด ==================== */\n.card {\n  flex: 1 1 420px;\n  min-width: 0;\n  background: #111a2b;\n  border: 1px solid #1f2a3d;\n  border-radius: 10px;\n  padding: 20px;\n  box-sizing: border-box;\n}\n.card-header {\n  display: flex;\n  align-items: center;\n  justify-content: space-between;\n  margin-bottom: 14px;\n}\n.card-label {\n  font-size: 12px;\n  font-weight: 600;\n  letter-spacing: .8px;\n  color: #9ca3af;\n  margin: 0;\n}\n.count-text { font-size: 13px; color: #9ca3af; }\n.count-text b { color: #e5e7eb; }\n\n/* ข้อความใต้หัวการ์ด Output */\n.hint-text { font-size: 12px; color: #9ca3af; margin: -6px 0 12px; }\n.hint-text.warning { color: #fbbf24; }\n\n/* ==================== ตารางจุด IO (2 คอลัมน์ เรียงลงตามลำดับ) ==================== */\n.point-grid {\n  display: grid;\n  grid-auto-flow: column;\n  grid-template-rows: repeat(var(--rows), auto);\n  grid-template-columns: repeat(2, minmax(0, 1fr));\n  gap: 10px;\n}\n.point-tile {\n  display: flex;\n  align-items: center;\n  gap: 10px;\n  min-height: 48px;\n  padding: 12px 14px;\n  background: #0b1220;\n  border: 1px solid #1f2a3d;\n  border-radius: 8px;\n  box-sizing: border-box;\n}\n.point-tile.point-button {                        /* จุด Output ที่กดได้ */\n  width: 100%;\n  font: inherit;\n  color: inherit;\n  text-align: left;\n  cursor: pointer;\n}\n.point-tile.point-button:hover:not(:disabled) { border-color: #2563eb; }\n.point-tile.point-button:disabled { cursor: not-allowed; opacity: .6; }\n\n/* หลอดไฟของแต่ละจุด */\n.lamp-dot {\n  width: 14px;\n  height: 14px;\n  border-radius: 50%;\n  flex: none;\n  background: #374151;                            /* ดับ */\n  transition: all .2s;\n}\n.lamp-dot.green { background: #22c55e; box-shadow: 0 0 10px #22c55e; }   /* Input ติด */\n.lamp-dot.amber { background: #f59e0b; box-shadow: 0 0 10px #f59e0b; }   /* Output ติด */\n\n/* ข้อความในแต่ละจุด */\n.point-address {\n  min-width: 42px;\n  font-family: Consolas, Menlo, monospace;\n  font-size: 15px;\n  font-weight: 600;\n}\n.point-name {\n  flex: 1;\n  min-width: 0;\n  overflow: hidden;\n  text-overflow: ellipsis;\n  white-space: nowrap;\n  font-size: 13px;\n  color: #9ca3af;\n}\n.state-pill {                                     /* ป้าย ON / OFF */\n  font-size: 11px;\n  font-weight: 700;\n  padding: 2px 9px;\n  border-radius: 999px;\n  border: 1px solid;\n}\n.state-pill.on  { color: #22c55e; border-color: rgba(34, 197, 94, .4); background: rgba(34, 197, 94, .12); }\n.state-pill.off { color: #9ca3af; border-color: #2b3a52; }\n\n/* ==================== แถบ error และบรรทัดค่าดิบ ==================== */\n.error-bar {\n  background: rgba(239, 68, 68, .12);\n  border: 1px solid rgba(239, 68, 68, .4);\n  color: #fca5a5;\n  border-radius: 8px;\n  padding: 10px 14px;\n  font-size: 13px;\n  word-break: break-word;\n}\n.raw-text {\n  padding: 0 4px;\n  font-family: Consolas, Menlo, monospace;\n  font-size: 11px;\n  color: #6b7280;\n  word-break: break-all;\n}\n\n/* ==================== ป้ายสี (tag) ใช้ร่วมกัน ==================== */\n.tag {\n  font-size: 11px;\n  font-weight: 600;\n  padding: 2px 10px;\n  border-radius: 999px;\n  border: 1px solid;\n}\n.tag-green { color: #22c55e; border-color: rgba(34, 197, 94, .4);  background: rgba(34, 197, 94, .12); }\n.tag-red   { color: #f87171; border-color: rgba(239, 68, 68, .4);  background: rgba(239, 68, 68, .12); }\n.tag-amber { color: #fbbf24; border-color: rgba(245, 158, 11, .4); background: rgba(245, 158, 11, .12); }\n.tag-gray  { color: #9ca3af; border-color: #2b3a52; }          /* ยังไม่มีข้อมูล */\n\n/* ==================== จอแคบ (มือถือ): เรียงจุดเป็นคอลัมน์เดียว ==================== */\n@media (max-width: 560px) {\n  .point-grid {\n    grid-auto-flow: row;\n    grid-template-rows: none;\n    grid-template-columns: 1fr;\n  }\n}\n</style>\n",
+  "storeOutMessages": true,
+  "passthru": false,
+  "resendOnRefresh": true,
+  "templateScope": "local",
+  "className": "",
+  "x": 1000,
+  "y": 140,
+  "wires": [
+   [
+    "io_guard"
+   ]
+  ]
+ },
+ {
+  "id": "io_guard",
+  "type": "function",
+  "z": "io_tab",
+  "name": "Manual only",
+  "func": "// อนุญาตสั่ง Output เฉพาะตอนโหมด MANUAL และ topic ที่ถูกต้องเท่านั้น\nif (!flow.get('manual_mode_active')) {\n  node.warn('Blocked: not in MANUAL mode');\n  return null;\n}\nconst isOutputTopic = /^output_q[01]_[0-7]$/.test(msg.topic);\nif (!isOutputTopic || typeof msg.payload !== 'boolean') return null;\n\n// จำค่าที่เพิ่งสั่งไว้ทันที เพื่อให้ปุ่มสลับ ON/OFF ถูกต้อง\n// (ถ้าอ่านกลับจาก PLC ได้ ค่าจริงจะมาแก้ทับในรอบถัดไป)\nconst rawValues = flow.get('plc_raw_values') || {};\nrawValues[msg.topic] = msg.payload;\nflow.set('plc_raw_values', rawValues);\n\n// ช่อง 1: สั่งเขียน PLC | ช่อง 2: ให้หน้าจออัปเดตทันที\nreturn [msg, { payload: {} }];",
+  "outputs": 2,
+  "x": 1180,
+  "y": 140,
+  "wires": [
+   [
+    "io_sw"
+   ],
+   [
+    "io_dec"
+   ]
+  ]
+ },
+ {
+  "id": "io_sw",
+  "type": "switch",
+  "z": "io_tab",
+  "name": "route by topic",
+  "property": "topic",
+  "propertyType": "msg",
+  "rules": [
+   {
+    "t": "eq",
+    "v": "output_q0_0",
+    "vt": "str"
+   },
+   {
+    "t": "eq",
+    "v": "output_q0_1",
+    "vt": "str"
+   },
+   {
+    "t": "eq",
+    "v": "output_q0_2",
+    "vt": "str"
+   },
+   {
+    "t": "eq",
+    "v": "output_q0_3",
+    "vt": "str"
+   },
+   {
+    "t": "eq",
+    "v": "output_q0_4",
+    "vt": "str"
+   },
+   {
+    "t": "eq",
+    "v": "output_q0_5",
+    "vt": "str"
+   },
+   {
+    "t": "eq",
+    "v": "output_q0_6",
+    "vt": "str"
+   },
+   {
+    "t": "eq",
+    "v": "output_q0_7",
+    "vt": "str"
+   },
+   {
+    "t": "eq",
+    "v": "output_q1_0",
+    "vt": "str"
+   },
+   {
+    "t": "eq",
+    "v": "output_q1_1",
+    "vt": "str"
+   }
+  ],
+  "checkall": "true",
+  "repair": false,
+  "outputs": 10,
+  "x": 1350,
+  "y": 140,
+  "wires": [
+   [
+    "io_o0"
+   ],
+   [
+    "io_o1"
+   ],
+   [
+    "io_o2"
+   ],
+   [
+    "io_o3"
+   ],
+   [
+    "io_o4"
+   ],
+   [
+    "io_o5"
+   ],
+   [
+    "io_o6"
+   ],
+   [
+    "io_o7"
+   ],
+   [
+    "io_o8"
+   ],
+   [
+    "io_o9"
+   ]
+  ]
+ },
+ {
+  "id": "io_o0",
+  "type": "s7 out",
+  "z": "io_tab",
+  "endpoint": "io2_ep",
+  "variable": "output_q0_0",
+  "name": "Q0.0",
+  "x": 1560,
+  "y": 40,
+  "wires": []
+ },
+ {
+  "id": "io_o1",
+  "type": "s7 out",
+  "z": "io_tab",
+  "endpoint": "io2_ep",
+  "variable": "output_q0_1",
+  "name": "Q0.1",
+  "x": 1560,
+  "y": 80,
+  "wires": []
+ },
+ {
+  "id": "io_o2",
+  "type": "s7 out",
+  "z": "io_tab",
+  "endpoint": "io2_ep",
+  "variable": "output_q0_2",
+  "name": "Q0.2",
+  "x": 1560,
+  "y": 120,
+  "wires": []
+ },
+ {
+  "id": "io_o3",
+  "type": "s7 out",
+  "z": "io_tab",
+  "endpoint": "io2_ep",
+  "variable": "output_q0_3",
+  "name": "Q0.3",
+  "x": 1560,
+  "y": 160,
+  "wires": []
+ },
+ {
+  "id": "io_o4",
+  "type": "s7 out",
+  "z": "io_tab",
+  "endpoint": "io2_ep",
+  "variable": "output_q0_4",
+  "name": "Q0.4",
+  "x": 1560,
+  "y": 200,
+  "wires": []
+ },
+ {
+  "id": "io_o5",
+  "type": "s7 out",
+  "z": "io_tab",
+  "endpoint": "io2_ep",
+  "variable": "output_q0_5",
+  "name": "Q0.5",
+  "x": 1560,
+  "y": 240,
+  "wires": []
+ },
+ {
+  "id": "io_o6",
+  "type": "s7 out",
+  "z": "io_tab",
+  "endpoint": "io2_ep",
+  "variable": "output_q0_6",
+  "name": "Q0.6",
+  "x": 1560,
+  "y": 280,
+  "wires": []
+ },
+ {
+  "id": "io_o7",
+  "type": "s7 out",
+  "z": "io_tab",
+  "endpoint": "io2_ep",
+  "variable": "output_q0_7",
+  "name": "Q0.7",
+  "x": 1560,
+  "y": 320,
+  "wires": []
+ },
+ {
+  "id": "io_o8",
+  "type": "s7 out",
+  "z": "io_tab",
+  "endpoint": "io2_ep",
+  "variable": "output_q1_0",
+  "name": "Q1.0",
+  "x": 1560,
+  "y": 360,
+  "wires": []
+ },
+ {
+  "id": "io_o9",
+  "type": "s7 out",
+  "z": "io_tab",
+  "endpoint": "io2_ep",
+  "variable": "output_q1_1",
+  "name": "Q1.1",
+  "x": 1560,
+  "y": 400,
+  "wires": []
+ },
+ {
+  "id": "io_catch",
+  "type": "catch",
+  "z": "io_tab",
+  "name": "",
+  "scope": null,
+  "uncaught": false,
+  "x": 130,
+  "y": 240,
+  "wires": [
+   [
+    "io_errf"
+   ]
+  ]
+ },
+ {
+  "id": "io_errf",
+  "type": "function",
+  "z": "io_tab",
+  "name": "Error text",
+  "func": "// แปลง error จากโหนด s7 เป็นข้อความสำหรับแถบแดงบนหน้าจอ\nconst errorText = (msg.error && msg.error.message) || 'unknown error';\nreturn { payload: { errorText } };",
+  "outputs": 1,
+  "x": 330,
+  "y": 240,
+  "wires": [
+   [
+    "io_merge"
+   ]
+  ]
+ },
+ {
+  "id": "io_merge",
+  "type": "function",
+  "z": "io_tab",
+  "name": "Merge state",
+  "func": "// รวมสถานะทั้งหมดเป็นก้อนเดียว เก็บใน flow context ชื่อ 'io_state'\n// เพื่อให้สลับหน้าแล้วได้สถานะครบ และใช้ตรวจสิทธิ์สั่ง Output\nconst ioState = flow.get('io_state') || {};\nconst incoming = msg.payload || {};\n['inputBits', 'outputBits', 'manual', 'running', 'fault', 'errorText', 'rawValues'].forEach(key => {\n  if (key in incoming) ioState[key] = incoming[key];\n});\nif (Array.isArray(incoming.inputBits)) ioState.errorText = '';   // ได้ข้อมูลสำเร็จ ล้าง error\n\nflow.set('io_state', ioState);\nflow.set('manual_mode_active', ioState.manual === true);         // ใช้ตรวจสิทธิ์สั่ง Output ที่โหนด Manual only\nreturn { payload: Object.assign({}, ioState) };",
+  "outputs": 1,
+  "x": 600,
+  "y": 140,
+  "wires": [
+   [
+    "io_tpl"
+   ]
+  ]
+ },
+ {
+  "id": "io_dbg",
+  "type": "debug",
+  "z": "io_tab",
+  "name": "s7 raw",
+  "active": true,
+  "tosidebar": true,
+  "console": false,
+  "tostatus": false,
+  "complete": "true",
+  "targetType": "full",
+  "x": 330,
+  "y": 60,
+  "wires": []
+ }
+]
